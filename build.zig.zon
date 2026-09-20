@@ -1,0 +1,7 @@
+.{
+    .name = .x402,
+    .version = "0.0.1",
+    .minimum_zig_version = "0.16.0",
+    .paths = .{""},
+    .fingerprint = 0xbb3c7d506f2f3bb0,
+}
