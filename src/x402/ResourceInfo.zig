@@ -35,6 +35,16 @@ pub const max_tags = 5;
 pub const max_tag_bytes = 32;
 pub const max_icon_url_bytes = 2048;
 
+pub const LimitError = error{
+    UrlTooLong,
+    DescriptionTooLong,
+    MimeTypeTooLong,
+    ServiceNameTooLong,
+    TooManyTags,
+    TagTooLong,
+    IconUrlTooLong,
+};
+
 /// Library default limits for decoded strings, measured in UTF-8 bytes.
 pub const Limits = struct {
     max_url_bytes: usize = 2048,
@@ -52,6 +62,42 @@ pub const Limits = struct {
         total = try std.math.add(usize, total, limits.max_mime_type_bytes);
 
         return total;
+    }
+
+    /// Checks existing ResourceInfo against the limits
+    pub fn check(limits: Limits, resource: ResourceInfo) LimitError!void {
+        if (resource.url.len > limits.max_url_bytes)
+            return LimitError.UrlTooLong;
+
+        if (resource.description) |value| {
+            if (value.len > limits.max_description_bytes)
+                return LimitError.DescriptionTooLong;
+        }
+
+        if (resource.mime_type) |value| {
+            if (value.len > limits.max_mime_type_bytes)
+                return LimitError.MimeTypeTooLong;
+        }
+
+        if (resource.service_name) |value| {
+            if (value.len > max_service_name_bytes)
+                return LimitError.ServiceNameTooLong;
+        }
+
+        if (resource.tags) |tags| {
+            if (tags.len > max_tags)
+                return LimitError.TooManyTags;
+
+            for (tags) |tag| {
+                if (tag.len > max_tag_bytes)
+                    return LimitError.TagTooLong;
+            }
+        }
+
+        if (resource.icon_url) |value| {
+            if (value.len > max_icon_url_bytes)
+                return LimitError.IconUrlTooLong;
+        }
     }
 };
 
@@ -96,4 +142,94 @@ test "Limits.maxStringBytes rejects too large limits" {
         error.Overflow,
         limits.maxStringBytes(),
     );
+}
+
+test "Limits.check accepts all fields at their limits" {
+    const limits: Limits = .{
+        .max_url_bytes = 3,
+        .max_description_bytes = 3,
+        .max_mime_type_bytes = 3,
+    };
+
+    const resource: ResourceInfo = .{
+        .url = "a.a",
+        .description = "aaa",
+        .mime_type = "mmm",
+        .service_name = "s" ** 32,
+        .tags = &.{
+            "a" ** 32,
+            "b" ** 32,
+            "c" ** 32,
+            "d" ** 32,
+            "e" ** 32,
+        },
+        .icon_url = "u" ** 2048,
+    };
+    try limits.check(resource);
+}
+
+test "Limits.check identifies every exceeded limit" {
+    const limits: Limits = .{
+        .max_url_bytes = 3,
+        .max_description_bytes = 4,
+        .max_mime_type_bytes = 5,
+    };
+
+    const Case = struct {
+        resource: ResourceInfo,
+        expected: LimitError,
+    };
+
+    const cases = [_]Case{
+        .{
+            .resource = .{ .url = "uuuu" },
+            .expected = LimitError.UrlTooLong,
+        },
+        .{
+            .resource = .{
+                .url = "uuu",
+                .description = "descr",
+            },
+            .expected = LimitError.DescriptionTooLong,
+        },
+        .{
+            .resource = .{
+                .url = "uuu",
+                .mime_type = "mime/t",
+            },
+            .expected = LimitError.MimeTypeTooLong,
+        },
+        .{
+            .resource = .{
+                .url = "uuu",
+                .service_name = "n" ** 33,
+            },
+            .expected = LimitError.ServiceNameTooLong,
+        },
+        .{
+            .resource = .{
+                .url = "uuu",
+                .tags = &.{ "a", "b", "c", "d", "e", "f" },
+            },
+            .expected = LimitError.TooManyTags,
+        },
+        .{
+            .resource = .{
+                .url = "uuu",
+                .tags = &.{ "a", "b", "c", "d", "e" ** 33 },
+            },
+            .expected = LimitError.TagTooLong,
+        },
+        .{
+            .resource = .{
+                .url = "uuu",
+                .icon_url = "u" ** 2049,
+            },
+            .expected = LimitError.IconUrlTooLong,
+        },
+    };
+
+    for (cases) |case| {
+        try std.testing.expectError(case.expected, limits.check(case.resource));
+    }
 }
