@@ -4,7 +4,7 @@ An x402 v2 core library with predictable latency and bounded memory use.
 
 ## Status
 
-- Types: `in progress`.
+- Types: `in progress`
 
 
 ## Why I am building this
