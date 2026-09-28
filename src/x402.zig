@@ -2,6 +2,7 @@
 
 const std = @import("std");
 pub const ResourceInfo = @import("x402/ResourceInfo.zig");
+pub const PaymentRequirements = @import("x402/PaymentRequirements.zig");
 
 test {
     std.testing.refAllDecls(@This());
