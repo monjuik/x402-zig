@@ -33,3 +33,178 @@ max_timeout_seconds: u32,
 /// Additional information.
 /// Reserved protocol keys: assetTransferMethod, paymentFlow; other keys are scheme-specific.
 extra: ?std.json.ObjectMap = null,
+
+// Specification limits.
+pub const max_network_bytes = 41; // inherited from CAIP-2: 8 + 1 + 32 = 41
+
+pub const LimitError = error{
+    SchemeTooLong,
+    NetworkTooLong,
+    AmountTooLong,
+    AssetTooLong,
+    PayToTooLong,
+    ExtraTooLong,
+};
+
+/// Library default limits for decoded strings, measured in UTF-8 bytes.
+pub const Limits = struct {
+    max_scheme_bytes: usize = 64,
+    max_amount_bytes: usize = 128,
+    max_asset_bytes: usize = 256,
+    max_pay_to_bytes: usize = 256,
+
+    /// Maximum total UTF-8 bytes of decoded keys and values in extra.
+    max_extra_string_bytes: usize = 4096,
+
+    /// Maximum byte length for all decoded string values.
+    pub fn maxStringBytes(limits: Limits) error{Overflow}!usize {
+        var total: usize = max_network_bytes;
+        total = try std.math.add(usize, total, limits.max_scheme_bytes);
+        total = try std.math.add(usize, total, limits.max_amount_bytes);
+        total = try std.math.add(usize, total, limits.max_asset_bytes);
+        total = try std.math.add(usize, total, limits.max_pay_to_bytes);
+        total = try std.math.add(usize, total, limits.max_extra_string_bytes);
+        return total;
+    }
+
+    /// Checks decoded string sizes against the limits.
+    pub fn check(limits: Limits, requirements: PaymentRequirements) LimitError!void {
+        if (requirements.scheme.len > limits.max_scheme_bytes)
+            return error.SchemeTooLong;
+
+        if (requirements.network.len > max_network_bytes)
+            return error.NetworkTooLong;
+
+        if (requirements.amount.len > limits.max_amount_bytes)
+            return error.AmountTooLong;
+
+        if (requirements.asset.len > limits.max_asset_bytes)
+            return error.AssetTooLong;
+
+        if (requirements.pay_to.len > limits.max_pay_to_bytes)
+            return error.PayToTooLong;
+
+        if (requirements.extra) |extra| {
+            var remaining = limits.max_extra_string_bytes;
+            try checkExtraStrings(.{ .object = extra }, &remaining);
+        }
+    }
+
+    fn checkExtraStrings(value: std.json.Value, remaining: *usize) LimitError!void {
+        switch (value) {
+            .string => |string| try consumeExtraBytes(string.len, remaining),
+            .object => |object| {
+                var iterator = object.iterator();
+                while (iterator.next()) |entry| {
+                    try consumeExtraBytes(entry.key_ptr.*.len, remaining);
+                    try checkExtraStrings(entry.value_ptr.*, remaining);
+                }
+            },
+            .array => |array| {
+                for (array.items) |item| {
+                    try checkExtraStrings(item, remaining);
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn consumeExtraBytes(bytes: usize, remaining: *usize) LimitError!void {
+        if (bytes > remaining.*)
+            return error.ExtraTooLong;
+
+        remaining.* -= bytes;
+    }
+};
+
+test "Limits.maxStringBytes handles custom limits and overflow" {
+    var limits: Limits = .{
+        .max_scheme_bytes = 1,
+        .max_amount_bytes = 2,
+        .max_asset_bytes = 3,
+        .max_pay_to_bytes = 4,
+        .max_extra_string_bytes = 5,
+    };
+    try std.testing.expectEqual(@as(usize, 56), try limits.maxStringBytes());
+
+    limits = .{
+        .max_scheme_bytes = std.math.maxInt(usize) - max_network_bytes,
+        .max_amount_bytes = 0,
+        .max_asset_bytes = 0,
+        .max_pay_to_bytes = 0,
+        .max_extra_string_bytes = 0,
+    };
+    try std.testing.expectEqual(
+        std.math.maxInt(usize),
+        try limits.maxStringBytes(),
+    );
+
+    limits.max_extra_string_bytes = 1;
+    try std.testing.expectError(error.Overflow, limits.maxStringBytes());
+}
+
+test "Limits.check accepts boundaries and identifies exceeded fields" {
+    const limits: Limits = .{
+        .max_scheme_bytes = 3,
+        .max_amount_bytes = 3,
+        .max_asset_bytes = 3,
+        .max_pay_to_bytes = 3,
+        .max_extra_string_bytes = 0,
+    };
+    const requirements: PaymentRequirements = .{
+        .scheme = "sss",
+        .network = "n" ** max_network_bytes,
+        .amount = "123",
+        .asset = "aaa",
+        .pay_to = "ppp",
+        .max_timeout_seconds = 60,
+    };
+    try limits.check(requirements);
+
+    const cases = .{
+        .{ "scheme", 3, error.SchemeTooLong },
+        .{ "network", max_network_bytes, error.NetworkTooLong },
+        .{ "amount", 3, error.AmountTooLong },
+        .{ "asset", 3, error.AssetTooLong },
+        .{ "pay_to", 3, error.PayToTooLong },
+    };
+    inline for (cases) |case| {
+        var oversized = requirements;
+        @field(oversized, case[0]) = "x" ** (case[1] + 1);
+        try std.testing.expectError(case[2], limits.check(oversized));
+    }
+}
+
+test "Limits.check counts decoded extra keys and strings recursively" {
+    var requirements: PaymentRequirements = .{
+        .scheme = "exact",
+        .network = "eip155:1",
+        .amount = "1",
+        .asset = "asset",
+        .pay_to = "recipient",
+        .max_timeout_seconds = 60,
+    };
+    var limits: Limits = .{ .max_extra_string_bytes = 0 };
+
+    // Absent and empty extra both fit a zero budget.
+    try limits.check(requirements);
+    requirements.extra = .{};
+    try limits.check(requirements);
+
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        \\{"a":["\u00e9",{"b":"x"}],"c":[1,true,null]}
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+    requirements.extra = parsed.value.object;
+
+    // Keys a, b, c: 3 bytes. Decoded strings é, x: 3 bytes.
+    limits.max_extra_string_bytes = 6;
+    try limits.check(requirements);
+
+    limits.max_extra_string_bytes = 5;
+    try std.testing.expectError(error.ExtraTooLong, limits.check(requirements));
+}
