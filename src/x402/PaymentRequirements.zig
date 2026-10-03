@@ -153,7 +153,7 @@ test "Limits.check accepts boundaries and identifies exceeded fields" {
     };
     const requirements: PaymentRequirements = .{
         .scheme = "sss",
-        .network = "n" ** max_network_bytes,
+        .network = &@as([max_network_bytes]u8, @splat('n')),
         .amount = "123",
         .asset = "aaa",
         .pay_to = "ppp",
@@ -170,7 +170,7 @@ test "Limits.check accepts boundaries and identifies exceeded fields" {
     };
     inline for (cases) |case| {
         var oversized = requirements;
-        @field(oversized, case[0]) = "x" ** (case[1] + 1);
+        @field(oversized, case[0]) = &@as([(case[1] + 1)]u8, @splat('x'));
         try std.testing.expectError(case[2], limits.check(oversized));
     }
 }

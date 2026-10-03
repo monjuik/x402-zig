@@ -155,15 +155,15 @@ test "Limits.check accepts all fields at their limits" {
         .url = "a.a",
         .description = "aaa",
         .mime_type = "mmm",
-        .service_name = "s" ** 32,
+        .service_name = &@as([32]u8, @splat('s')),
         .tags = &.{
-            "a" ** 32,
-            "b" ** 32,
-            "c" ** 32,
-            "d" ** 32,
-            "e" ** 32,
+            &@as([32]u8, @splat('a')),
+            &@as([32]u8, @splat('b')),
+            &@as([32]u8, @splat('c')),
+            &@as([32]u8, @splat('d')),
+            &@as([32]u8, @splat('e')),
         },
-        .icon_url = "u" ** 2048,
+        .icon_url = &@as([2048]u8, @splat('u')),
     };
     try limits.check(resource);
 }
@@ -202,7 +202,7 @@ test "Limits.check identifies every exceeded limit" {
         .{
             .resource = .{
                 .url = "uuu",
-                .service_name = "n" ** 33,
+                .service_name = &@as([33]u8, @splat('n')),
             },
             .expected = LimitError.ServiceNameTooLong,
         },
@@ -216,14 +216,14 @@ test "Limits.check identifies every exceeded limit" {
         .{
             .resource = .{
                 .url = "uuu",
-                .tags = &.{ "a", "b", "c", "d", "e" ** 33 },
+                .tags = &.{ "a", "b", "c", "d", &@as([33]u8, @splat('e')) },
             },
             .expected = LimitError.TagTooLong,
         },
         .{
             .resource = .{
                 .url = "uuu",
-                .icon_url = "u" ** 2049,
+                .icon_url = &@as([2049]u8, @splat('u')),
             },
             .expected = LimitError.IconUrlTooLong,
         },
