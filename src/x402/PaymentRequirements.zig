@@ -7,6 +7,7 @@
 //! which must remain valid while the payment requirements are in use.
 
 const std = @import("std");
+const json_limits = @import("json_limits.zig");
 
 const PaymentRequirements = @This();
 
@@ -85,35 +86,11 @@ pub const Limits = struct {
             return error.PayToTooLong;
 
         if (requirements.extra) |extra| {
-            var remaining = limits.max_extra_string_bytes;
-            try checkExtraStrings(.{ .object = extra }, &remaining);
+            json_limits.checkStringBytes(
+                .{ .object = extra },
+                limits.max_extra_string_bytes,
+            ) catch return LimitError.ExtraTooLong;
         }
-    }
-
-    fn checkExtraStrings(value: std.json.Value, remaining: *usize) LimitError!void {
-        switch (value) {
-            .string => |string| try consumeExtraBytes(string.len, remaining),
-            .object => |object| {
-                var iterator = object.iterator();
-                while (iterator.next()) |entry| {
-                    try consumeExtraBytes(entry.key_ptr.*.len, remaining);
-                    try checkExtraStrings(entry.value_ptr.*, remaining);
-                }
-            },
-            .array => |array| {
-                for (array.items) |item| {
-                    try checkExtraStrings(item, remaining);
-                }
-            },
-            else => {},
-        }
-    }
-
-    fn consumeExtraBytes(bytes: usize, remaining: *usize) LimitError!void {
-        if (bytes > remaining.*)
-            return error.ExtraTooLong;
-
-        remaining.* -= bytes;
     }
 };
 
@@ -173,38 +150,22 @@ test "Limits.check accepts boundaries and identifies exceeded fields" {
         @field(oversized, case[0]) = &@as([(case[1] + 1)]u8, @splat('x'));
         try std.testing.expectError(case[2], limits.check(oversized));
     }
-}
-
-test "Limits.check counts decoded extra keys and strings recursively" {
-    var requirements: PaymentRequirements = .{
-        .scheme = "exact",
-        .network = "eip155:1",
-        .amount = "1",
-        .asset = "asset",
-        .pay_to = "recipient",
-        .max_timeout_seconds = 60,
-    };
-    var limits: Limits = .{ .max_extra_string_bytes = 0 };
-
-    // Absent and empty extra both fit a zero budget.
-    try limits.check(requirements);
-    requirements.extra = .{};
-    try limits.check(requirements);
+    // Absent extra was checked above; empty extra also fits a zero budget.
+    var with_extra = requirements;
+    with_extra.extra = .{};
+    try limits.check(with_extra);
 
     const parsed = try std.json.parseFromSlice(
         std.json.Value,
         std.testing.allocator,
-        \\{"a":["\u00e9",{"b":"x"}],"c":[1,true,null]}
+        \\{"a":null}
     ,
         .{},
     );
     defer parsed.deinit();
-    requirements.extra = parsed.value.object;
-
-    // Keys a, b, c: 3 bytes. Decoded strings é, x: 3 bytes.
-    limits.max_extra_string_bytes = 6;
-    try limits.check(requirements);
-
-    limits.max_extra_string_bytes = 5;
-    try std.testing.expectError(error.ExtraTooLong, limits.check(requirements));
+    with_extra.extra = parsed.value.object;
+    var extra_limits = limits;
+    extra_limits.max_extra_string_bytes = 1;
+    try extra_limits.check(with_extra);
+    try std.testing.expectError(error.ExtraTooLong, limits.check(with_extra));
 }

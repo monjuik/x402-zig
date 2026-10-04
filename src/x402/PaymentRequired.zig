@@ -9,6 +9,7 @@
 const std = @import("std");
 const ResourceInfo = @import("ResourceInfo.zig");
 const PaymentRequirements = @import("PaymentRequirements.zig");
+const json_limits = @import("json_limits.zig");
 
 const PaymentRequired = @This();
 
@@ -83,35 +84,11 @@ pub const Limits = struct {
             if (extensions.count() > limits.max_extensions)
                 return error.TooManyExtensions;
 
-            var remaining = limits.max_extensions_string_bytes;
-            try checkExtensionStrings(.{ .object = extensions }, &remaining);
+            json_limits.checkStringBytes(
+                .{ .object = extensions },
+                limits.max_extensions_string_bytes,
+            ) catch return LimitError.ExtensionsTooLong;
         }
-    }
-
-    fn checkExtensionStrings(value: std.json.Value, remaining: *usize) LimitError!void {
-        switch (value) {
-            .string => |string| try consumeExtensionBytes(string.len, remaining),
-            .object => |object| {
-                var iterator = object.iterator();
-                while (iterator.next()) |entry| {
-                    try consumeExtensionBytes(entry.key_ptr.*.len, remaining);
-                    try checkExtensionStrings(entry.value_ptr.*, remaining);
-                }
-            },
-            .array => |array| {
-                for (array.items) |item| {
-                    try checkExtensionStrings(item, remaining);
-                }
-            },
-            else => {},
-        }
-    }
-
-    fn consumeExtensionBytes(bytes: usize, remaining: *usize) LimitError!void {
-        if (bytes > remaining.*)
-            return error.ExtensionsTooLong;
-
-        remaining.* -= bytes;
     }
 };
 
@@ -200,15 +177,12 @@ test "Limits.check accepts boundaries and identifies exceeded fields" {
     inline for (cases) |case| {
         try std.testing.expectError(case[1], case[0].check(response));
     }
-}
-
-test "Limits.check counts decoded extension keys and strings recursively" {
-    var response: PaymentRequired = .{
+    var empty: PaymentRequired = .{
         .x402_version = 2,
         .resource = .{ .url = "url" },
         .accepts = &.{},
     };
-    var limits: Limits = .{
+    const zero_limits: Limits = .{
         .max_error_bytes = 0,
         .max_accepts = 0,
         .max_extensions = 0,
@@ -216,23 +190,20 @@ test "Limits.check counts decoded extension keys and strings recursively" {
     };
 
     // Absent and empty optional fields fit zero budgets.
-    try limits.check(response);
-    response.@"error" = "";
-    response.extensions = .{};
-    try limits.check(response);
+    try zero_limits.check(empty);
+    empty.@"error" = "";
+    empty.extensions = .{};
+    try zero_limits.check(empty);
 
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
-        \\{"\u00e9":["\u00e9",{"b":"x"}],"c":[1,true,null]}
+    const nested = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"a":{"b":null}}
     , .{});
-    defer parsed.deinit();
-    response.extensions = parsed.value.object;
+    defer nested.deinit();
+    empty.extensions = nested.value.object;
 
-    // Two top-level extensions; nested keys do not affect their count.
-    // Decoded keys: 2 + 1 + 1 = 4 bytes. String values: 2 + 1 = 3 bytes.
-    limits.max_extensions = 2;
-    limits.max_extensions_string_bytes = 7;
-    try limits.check(response);
-
-    limits.max_extensions_string_bytes = 6;
-    try std.testing.expectError(error.ExtensionsTooLong, limits.check(response));
+    // Nested keys do not count as top-level extensions.
+    var nested_limits = zero_limits;
+    nested_limits.max_extensions = 1;
+    nested_limits.max_extensions_string_bytes = 2;
+    try nested_limits.check(empty);
 }
