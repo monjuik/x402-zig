@@ -5,6 +5,7 @@ pub const ResourceInfo = @import("x402/ResourceInfo.zig");
 pub const PaymentRequirements = @import("x402/PaymentRequirements.zig");
 pub const PaymentRequired = @import("x402/PaymentRequired.zig");
 pub const PaymentPayload = @import("x402/PaymentPayload.zig");
+pub const SettleResponse = @import("x402/SettleResponse.zig");
 
 test {
     std.testing.refAllDecls(@This());
