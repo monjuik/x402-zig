@@ -7,6 +7,7 @@
 //! which must remain valid while the settlement response is in use.
 
 const std = @import("std");
+const json_limits = @import("json_limits.zig");
 
 const SettleResponse = @This();
 
@@ -57,4 +58,166 @@ pub const Limits = struct {
     max_extensions: usize = 16,
     /// Maximum total UTF-8 bytes of decoded keys and values in extensions.
     max_extensions_string_bytes: usize = 16 * 1024,
+
+    /// Maximum byte length for all decoded string values.
+    pub fn maxStringBytes(limits: Limits) error{Overflow}!usize {
+        var total: usize = max_network_bytes;
+        total = try std.math.add(usize, total, limits.max_error_reason_bytes);
+        total = try std.math.add(usize, total, limits.max_payer_bytes);
+        total = try std.math.add(usize, total, limits.max_transaction_bytes);
+        total = try std.math.add(usize, total, limits.max_amount_bytes);
+
+        if (limits.max_extensions > 0) {
+            total = try std.math.add(usize, total, limits.max_extensions_string_bytes);
+        }
+
+        return total;
+    }
+
+    pub fn check(limits: Limits, response: SettleResponse) LimitError!void {
+        if (response.error_reason) |reason| {
+            if (reason.len > limits.max_error_reason_bytes)
+                return error.ErrorReasonTooLong;
+        }
+
+        if (response.payer) |payer| {
+            if (payer.len > limits.max_payer_bytes)
+                return error.PayerTooLong;
+        }
+
+        if (response.transaction.len > limits.max_transaction_bytes)
+            return error.TransactionTooLong;
+
+        if (response.network.len > max_network_bytes)
+            return error.NetworkTooLong;
+
+        if (response.amount) |amount| {
+            if (amount.len > limits.max_amount_bytes)
+                return error.AmountTooLong;
+        }
+
+        if (response.extensions) |extensions| {
+            if (extensions.count() > limits.max_extensions)
+                return error.TooManyExtensions;
+
+            json_limits.checkStringBytes(
+                .{ .object = extensions },
+                limits.max_extensions_string_bytes,
+            ) catch return LimitError.ExtensionsTooLong;
+        }
+    }
 };
+
+test "Limits.maxStringBytes handles custom limits and overflow" {
+    var limits: Limits = .{
+        .max_error_reason_bytes = 1,
+        .max_payer_bytes = 2,
+        .max_transaction_bytes = 3,
+        .max_amount_bytes = 4,
+        .max_extensions = 2,
+        .max_extensions_string_bytes = 5,
+    };
+    try std.testing.expectEqual(@as(usize, 56), try limits.maxStringBytes());
+
+    const max = std.math.maxInt(usize);
+
+    limits.max_extensions = 0;
+    limits.max_extensions_string_bytes = max;
+    try std.testing.expectEqual(@as(usize, 51), try limits.maxStringBytes());
+
+    limits = .{
+        .max_error_reason_bytes = max - max_network_bytes,
+        .max_payer_bytes = 0,
+        .max_transaction_bytes = 0,
+        .max_amount_bytes = 0,
+        .max_extensions = 1,
+        .max_extensions_string_bytes = 0,
+    };
+    try std.testing.expectEqual(max, try limits.maxStringBytes());
+
+    limits.max_extensions_string_bytes = 1;
+    try std.testing.expectError(error.Overflow, limits.maxStringBytes());
+
+    const cases = [_]Limits{
+        .{ .max_error_reason_bytes = max },
+        .{ .max_payer_bytes = max },
+        .{ .max_transaction_bytes = max },
+        .{ .max_amount_bytes = max },
+        .{ .max_extensions_string_bytes = max },
+    };
+    for (cases) |case| {
+        try std.testing.expectError(error.Overflow, case.maxStringBytes());
+    }
+}
+
+test "Limits.check accepts boundaries and identifies exceeded fields" {
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"a":{"b":"c"}}
+    , .{});
+    defer parsed.deinit();
+
+    const limits: Limits = .{
+        .max_error_reason_bytes = 3,
+        .max_payer_bytes = 2,
+        .max_transaction_bytes = 4,
+        .max_amount_bytes = 1,
+        .max_extensions = 1,
+        .max_extensions_string_bytes = 3,
+    };
+    const response: SettleResponse = .{
+        .success = false,
+        .error_reason = "err",
+        .payer = "pp",
+        .transaction = "tttt",
+        .network = &@as([max_network_bytes]u8, @splat('n')),
+        .amount = "1",
+        .extensions = parsed.value.object,
+    };
+    try limits.check(response);
+
+    const cases = .{
+        .{ "error_reason", 3, error.ErrorReasonTooLong },
+        .{ "payer", 2, error.PayerTooLong },
+        .{ "transaction", 4, error.TransactionTooLong },
+        .{ "network", max_network_bytes, error.NetworkTooLong },
+        .{ "amount", 1, error.AmountTooLong },
+    };
+    inline for (cases) |case| {
+        var oversized = response;
+        @field(oversized, case[0]) =
+            &@as([case[1] + 1]u8, @splat('x'));
+        try std.testing.expectError(case[2], limits.check(oversized));
+    }
+
+    const extension_cases = .{
+        .{ "max_extensions", 0, error.TooManyExtensions },
+        .{ "max_extensions_string_bytes", 2, error.ExtensionsTooLong },
+    };
+    inline for (extension_cases) |case| {
+        var reduced = limits;
+        @field(reduced, case[0]) = case[1];
+        try std.testing.expectError(case[2], reduced.check(response));
+    }
+
+    const zero_limits: Limits = .{
+        .max_error_reason_bytes = 0,
+        .max_payer_bytes = 0,
+        .max_transaction_bytes = 0,
+        .max_amount_bytes = 0,
+        .max_extensions = 0,
+        .max_extensions_string_bytes = 0,
+    };
+    var empty: SettleResponse = .{
+        .success = true,
+        .transaction = "",
+        .network = "",
+    };
+
+    // Absent and empty optional fields fit zero budgets.
+    try zero_limits.check(empty);
+    empty.error_reason = "";
+    empty.payer = "";
+    empty.amount = "";
+    empty.extensions = .{};
+    try zero_limits.check(empty);
+}
