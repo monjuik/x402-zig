@@ -28,6 +28,35 @@ extensions: ?std.json.ObjectMap = null,
 /// Scheme-specific additional data.
 extra: ?std.json.ObjectMap = null,
 
+pub fn jsonStringify(self: VerifyResponse, jw: anytype) !void {
+    try jw.beginObject();
+
+    try jw.objectField("isValid");
+    try jw.write(self.is_valid);
+
+    if (self.invalid_reason) |value| {
+        try jw.objectField("invalidReason");
+        try jw.write(value);
+    }
+
+    if (self.payer) |value| {
+        try jw.objectField("payer");
+        try jw.write(value);
+    }
+
+    if (self.extensions) |value| {
+        try jw.objectField("extensions");
+        try jw.write(std.json.Value{ .object = value });
+    }
+
+    if (self.extra) |value| {
+        try jw.objectField("extra");
+        try jw.write(std.json.Value{ .object = value });
+    }
+
+    try jw.endObject();
+}
+
 pub const LimitError = error{
     InvalidReasonTooLong,
     PayerTooLong,
@@ -193,4 +222,28 @@ test "Limits.check accepts boundaries and identifies exceeded fields" {
     empty.extensions = .{};
     empty.extra = .{};
     try zero_limits.check(empty);
+}
+
+test "jsonStringify writes verification result and optional fields" {
+    var response: VerifyResponse = .{ .is_valid = true };
+
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.json.Stringify.value(response, .{}, &writer);
+    try std.testing.expectEqualStrings(
+        \\{"isValid":true}
+    , writer.buffered());
+
+    response.is_valid = false;
+    response.invalid_reason = "invalid_signature";
+    response.payer = "payer";
+    response.extensions = .{};
+    response.extra = .{};
+    writer = .fixed(&buffer);
+
+    try std.json.Stringify.value(response, .{}, &writer);
+    try std.testing.expectEqualStrings(
+        \\{"isValid":false,"invalidReason":"invalid_signature","payer":"payer","extensions":{},"extra":{}}
+    , writer.buffered());
 }

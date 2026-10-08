@@ -38,6 +38,41 @@ extensions: ?std.json.ObjectMap = null,
 // Specification limits.
 pub const max_network_bytes = 41; // inherited from CAIP-2: 8 + 1 + 32 = 41
 
+pub fn jsonStringify(self: SettleResponse, jw: anytype) !void {
+    try jw.beginObject();
+
+    try jw.objectField("success");
+    try jw.write(self.success);
+
+    if (self.error_reason) |value| {
+        try jw.objectField("errorReason");
+        try jw.write(value);
+    }
+
+    if (self.payer) |value| {
+        try jw.objectField("payer");
+        try jw.write(value);
+    }
+
+    try jw.objectField("transaction");
+    try jw.write(self.transaction);
+
+    try jw.objectField("network");
+    try jw.write(self.network);
+
+    if (self.amount) |value| {
+        try jw.objectField("amount");
+        try jw.write(value);
+    }
+
+    if (self.extensions) |value| {
+        try jw.objectField("extensions");
+        try jw.write(std.json.Value{ .object = value });
+    }
+
+    try jw.endObject();
+}
+
 pub const LimitError = error{
     ErrorReasonTooLong,
     PayerTooLong,
@@ -220,4 +255,32 @@ test "Limits.check accepts boundaries and identifies exceeded fields" {
     empty.amount = "";
     empty.extensions = .{};
     try zero_limits.check(empty);
+}
+
+test "jsonStringify writes settlement result and optional fields" {
+    var response: SettleResponse = .{
+        .success = false,
+        .transaction = "",
+        .network = "eip155:1",
+    };
+
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.json.Stringify.value(response, .{}, &writer);
+    try std.testing.expectEqualStrings(
+        \\{"success":false,"transaction":"","network":"eip155:1"}
+    , writer.buffered());
+
+    response.error_reason = "settlement_pending";
+    response.payer = "payer";
+    response.transaction = "tx";
+    response.amount = "100";
+    response.extensions = .{};
+    writer = .fixed(&buffer);
+
+    try std.json.Stringify.value(response, .{}, &writer);
+    try std.testing.expectEqualStrings(
+        \\{"success":false,"errorReason":"settlement_pending","payer":"payer","transaction":"tx","network":"eip155:1","amount":"100","extensions":{}}
+    , writer.buffered());
 }

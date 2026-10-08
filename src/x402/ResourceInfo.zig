@@ -35,6 +35,40 @@ pub const max_tags = 5;
 pub const max_tag_bytes = 32;
 pub const max_icon_url_bytes = 2048;
 
+pub fn jsonStringify(self: ResourceInfo, jw: anytype) !void {
+    try jw.beginObject();
+
+    try jw.objectField("url");
+    try jw.write(self.url);
+
+    if (self.description) |value| {
+        try jw.objectField("description");
+        try jw.write(value);
+    }
+
+    if (self.mime_type) |value| {
+        try jw.objectField("mimeType");
+        try jw.write(value);
+    }
+
+    if (self.service_name) |value| {
+        try jw.objectField("serviceName");
+        try jw.write(value);
+    }
+
+    if (self.tags) |value| {
+        try jw.objectField("tags");
+        try jw.write(value);
+    }
+
+    if (self.icon_url) |value| {
+        try jw.objectField("iconUrl");
+        try jw.write(value);
+    }
+
+    try jw.endObject();
+}
+
 pub const LimitError = error{
     UrlTooLong,
     DescriptionTooLong,
@@ -231,5 +265,38 @@ test "Limits.check identifies every exceeded limit" {
 
     for (cases) |case| {
         try std.testing.expectError(case.expected, limits.check(case.resource));
+    }
+}
+
+test "jsonStringify writes protocol fields and omits absent optionals" {
+    var buffer: [1024]u8 = undefined;
+
+    {
+        var writer: std.Io.Writer = .fixed(&buffer);
+        const resource: ResourceInfo = .{ .url = "https://example.com" };
+
+        try std.json.Stringify.value(resource, .{}, &writer);
+
+        try std.testing.expectEqualStrings(
+            \\{"url":"https://example.com"}
+        , writer.buffered());
+    }
+
+    {
+        var writer: std.Io.Writer = .fixed(&buffer);
+        const resource: ResourceInfo = .{
+            .url = "https://example.com",
+            .description = "",
+            .mime_type = "application/json",
+            .service_name = "Example",
+            .tags = &.{ "api", "paid" },
+            .icon_url = "https://example.com/icon.png",
+        };
+
+        try std.json.Stringify.value(resource, .{}, &writer);
+
+        try std.testing.expectEqualStrings(
+            \\{"url":"https://example.com","description":"","mimeType":"application/json","serviceName":"Example","tags":["api","paid"],"iconUrl":"https://example.com/icon.png"}
+        , writer.buffered());
     }
 }

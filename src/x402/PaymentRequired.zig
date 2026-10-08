@@ -30,6 +30,31 @@ accepts: []const PaymentRequirements,
 /// Protocol extensions data.
 extensions: ?std.json.ObjectMap = null,
 
+pub fn jsonStringify(self: PaymentRequired, jw: anytype) !void {
+    try jw.beginObject();
+
+    try jw.objectField("x402Version");
+    try jw.write(self.x402_version);
+
+    if (self.@"error") |value| {
+        try jw.objectField("error");
+        try jw.write(value);
+    }
+
+    try jw.objectField("resource");
+    try jw.write(self.resource);
+
+    try jw.objectField("accepts");
+    try jw.write(self.accepts);
+
+    if (self.extensions) |value| {
+        try jw.objectField("extensions");
+        try jw.write(std.json.Value{ .object = value });
+    }
+
+    try jw.endObject();
+}
+
 pub const LimitError = ResourceInfo.LimitError || PaymentRequirements.LimitError || error{
     ErrorTooLong,
     TooManyAccepts,
@@ -206,4 +231,36 @@ test "Limits.check accepts boundaries and identifies exceeded fields" {
     nested_limits.max_extensions = 1;
     nested_limits.max_extensions_string_bytes = 2;
     try nested_limits.check(empty);
+}
+
+test "jsonStringify writes nested payment requirements and optional fields" {
+    var response: PaymentRequired = .{
+        .x402_version = 2,
+        .resource = .{ .url = "url" },
+        .accepts = &.{.{
+            .scheme = "exact",
+            .network = "eip155:1",
+            .amount = "100",
+            .asset = "asset",
+            .pay_to = "recipient",
+            .max_timeout_seconds = 60,
+        }},
+    };
+
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.json.Stringify.value(response, .{}, &writer);
+    try std.testing.expectEqualStrings(
+        \\{"x402Version":2,"resource":{"url":"url"},"accepts":[{"scheme":"exact","network":"eip155:1","amount":"100","asset":"asset","payTo":"recipient","maxTimeoutSeconds":60}]}
+    , writer.buffered());
+
+    response.@"error" = "Payment required";
+    response.extensions = .{};
+    writer = .fixed(&buffer);
+
+    try std.json.Stringify.value(response, .{}, &writer);
+    try std.testing.expectEqualStrings(
+        \\{"x402Version":2,"error":"Payment required","resource":{"url":"url"},"accepts":[{"scheme":"exact","network":"eip155:1","amount":"100","asset":"asset","payTo":"recipient","maxTimeoutSeconds":60}],"extensions":{}}
+    , writer.buffered());
 }
