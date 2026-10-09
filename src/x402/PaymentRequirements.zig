@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const json_limits = @import("json_limits.zig");
+const json_parse = @import("json_parse.zig");
 
 const PaymentRequirements = @This();
 
@@ -123,6 +124,54 @@ pub const Limits = struct {
     }
 };
 
+pub const ParseOptions = struct {
+    limits: Limits = .{},
+};
+
+/// Reads one JSON object. Pass a reader bounded to this message.
+pub fn parse(
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    options: ParseOptions,
+) !PaymentRequirements {
+    const requirements = try json_parse.parse(PaymentRequirements, allocator, reader);
+    try options.limits.check(requirements); // yes, we already used the memory.
+    // But this allows us to use standard parser
+
+    return requirements;
+}
+
+pub fn jsonParse(
+    allocator: std.mem.Allocator,
+    source: anytype,
+    options: std.json.ParseOptions,
+) !PaymentRequirements {
+    const json = try std.json.innerParse(Json, allocator, source, options);
+    return json.toPaymentRequirements();
+}
+
+const Json = struct {
+    scheme: []const u8,
+    network: []const u8,
+    amount: []const u8,
+    asset: []const u8,
+    payTo: []const u8,
+    maxTimeoutSeconds: u32,
+    extra: ?std.json.ArrayHashMap(std.json.Value) = null,
+
+    fn toPaymentRequirements(self: Json) PaymentRequirements {
+        return .{
+            .scheme = self.scheme,
+            .network = self.network,
+            .amount = self.amount,
+            .asset = self.asset,
+            .pay_to = self.payTo,
+            .max_timeout_seconds = self.maxTimeoutSeconds,
+            .extra = if (self.extra) |value| value.map else null,
+        };
+    }
+};
+
 test "Limits.maxStringBytes handles custom limits and overflow" {
     var limits: Limits = .{
         .max_scheme_bytes = 1,
@@ -232,4 +281,51 @@ test "jsonStringify writes protocol fields and optional extra" {
     try std.testing.expectEqualStrings(
         \\{"scheme":"exact","network":"eip155:1","amount":"100","asset":"asset","payTo":"recipient","maxTimeoutSeconds":60,"extra":{"assetTransferMethod":"permit2"}}
     , writer.buffered());
+}
+
+test "parse maps protocol fields and extra to PaymentRequirements" {
+    const input =
+        \\{"scheme":"exact","network":"eip155:1","amount":"100","asset":"asset","payTo":"recipient","maxTimeoutSeconds":60,"extra":{"assetTransferMethod":"permit2"}}
+    ;
+
+    var storage: [4096]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&storage);
+    var reader: std.Io.Reader = .fixed(input);
+
+    const requirements = try PaymentRequirements.parse(
+        fba.allocator(),
+        &reader,
+        .{},
+    );
+
+    try std.testing.expectEqualStrings("exact", requirements.scheme);
+    try std.testing.expectEqualStrings("eip155:1", requirements.network);
+    try std.testing.expectEqualStrings("100", requirements.amount);
+    try std.testing.expectEqualStrings("asset", requirements.asset);
+    try std.testing.expectEqualStrings("recipient", requirements.pay_to);
+    try std.testing.expectEqual(@as(u32, 60), requirements.max_timeout_seconds);
+
+    const extra = requirements.extra.?;
+    try std.testing.expectEqual(@as(usize, 1), extra.count());
+    try std.testing.expectEqualStrings(
+        "permit2",
+        extra.get("assetTransferMethod").?.string,
+    );
+}
+
+test "parse enforces custom limits" {
+    const input =
+        \\{"scheme":"exact","network":"eip155:1","amount":"100","asset":"asset","payTo":"recipient","maxTimeoutSeconds":60,"extra":{"a":"b"}}
+    ;
+
+    var storage: [4096]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&storage);
+    var reader: std.Io.Reader = .fixed(input);
+
+    try std.testing.expectError(
+        error.ExtraTooLong,
+        PaymentRequirements.parse(fba.allocator(), &reader, .{
+            .limits = .{ .max_extra_string_bytes = 1 },
+        }),
+    );
 }

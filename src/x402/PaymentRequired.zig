@@ -10,6 +10,7 @@ const std = @import("std");
 const ResourceInfo = @import("ResourceInfo.zig");
 const PaymentRequirements = @import("PaymentRequirements.zig");
 const json_limits = @import("json_limits.zig");
+const json_parse = @import("json_parse.zig");
 
 const PaymentRequired = @This();
 
@@ -114,6 +115,48 @@ pub const Limits = struct {
                 limits.max_extensions_string_bytes,
             ) catch return LimitError.ExtensionsTooLong;
         }
+    }
+};
+
+pub const ParseOptions = struct {
+    limits: Limits = .{},
+};
+
+/// Reads one JSON object. Pass a reader bounded to this message.
+pub fn parse(
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    options: ParseOptions,
+) !PaymentRequired {
+    const response = try json_parse.parse(PaymentRequired, allocator, reader);
+    try options.limits.check(response);
+    return response;
+}
+
+pub fn jsonParse(
+    allocator: std.mem.Allocator,
+    source: anytype,
+    options: std.json.ParseOptions,
+) !PaymentRequired {
+    const json = try std.json.innerParse(Json, allocator, source, options);
+    return json.toPaymentRequired();
+}
+
+const Json = struct {
+    x402Version: u8,
+    @"error": ?[]const u8 = null,
+    resource: ResourceInfo,
+    accepts: []const PaymentRequirements,
+    extensions: ?std.json.ArrayHashMap(std.json.Value) = null,
+
+    fn toPaymentRequired(self: Json) PaymentRequired {
+        return .{
+            .x402_version = self.x402Version,
+            .@"error" = self.@"error",
+            .resource = self.resource,
+            .accepts = self.accepts,
+            .extensions = if (self.extensions) |value| value.map else null,
+        };
     }
 };
 
@@ -263,4 +306,50 @@ test "jsonStringify writes nested payment requirements and optional fields" {
     try std.testing.expectEqualStrings(
         \\{"x402Version":2,"error":"Payment required","resource":{"url":"url"},"accepts":[{"scheme":"exact","network":"eip155:1","amount":"100","asset":"asset","payTo":"recipient","maxTimeoutSeconds":60}],"extensions":{}}
     , writer.buffered());
+}
+
+test "parse maps PaymentRequired and nested types" {
+    const input =
+        \\{"x402Version":2,"error":"Payment required","resource":{"url":"url","mimeType":"application/json"},"accepts":[{"scheme":"exact","network":"eip155:1","amount":"100","asset":"asset","payTo":"recipient","maxTimeoutSeconds":60}],"extensions":{"example":true}}
+    ;
+
+    var storage: [8192]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&storage);
+    var reader: std.Io.Reader = .fixed(input);
+
+    const response = try PaymentRequired.parse(fba.allocator(), &reader, .{});
+
+    try std.testing.expectEqual(@as(u8, 2), response.x402_version);
+    try std.testing.expectEqualStrings("Payment required", response.@"error".?);
+    try std.testing.expectEqualStrings("url", response.resource.url);
+    try std.testing.expectEqualStrings(
+        "application/json",
+        response.resource.mime_type.?,
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), response.accepts.len);
+    try std.testing.expectEqualStrings("recipient", response.accepts[0].pay_to);
+
+    const extensions = response.extensions.?;
+    try std.testing.expectEqual(@as(usize, 1), extensions.count());
+    try std.testing.expect(extensions.get("example").?.bool);
+}
+
+test "parse enforces custom nested limits" {
+    const input =
+        \\{"x402Version":2,"resource":{"url":"abcd"},"accepts":[]}
+    ;
+
+    var storage: [4096]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&storage);
+    var reader: std.Io.Reader = .fixed(input);
+
+    try std.testing.expectError(
+        error.UrlTooLong,
+        PaymentRequired.parse(fba.allocator(), &reader, .{
+            .limits = .{
+                .resource = .{ .max_url_bytes = 3 },
+            },
+        }),
+    );
 }

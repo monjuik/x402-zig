@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const json_limits = @import("json_limits.zig");
+const json_parse = @import("json_parse.zig");
 
 const SettleResponse = @This();
 
@@ -140,6 +141,54 @@ pub const Limits = struct {
                 limits.max_extensions_string_bytes,
             ) catch return LimitError.ExtensionsTooLong;
         }
+    }
+};
+
+pub const ParseOptions = struct {
+    limits: Limits = .{},
+};
+
+/// Reads one JSON object. Pass a reader bounded to this message.
+pub fn parse(
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    options: ParseOptions,
+) !SettleResponse {
+    const response = try json_parse.parse(SettleResponse, allocator, reader);
+    try options.limits.check(response); // yes, we already used the memory.
+    // But this allows us to use standard parser
+
+    return response;
+}
+
+pub fn jsonParse(
+    allocator: std.mem.Allocator,
+    source: anytype,
+    options: std.json.ParseOptions,
+) !SettleResponse {
+    const json = try std.json.innerParse(Json, allocator, source, options);
+    return json.toSettleResponse();
+}
+
+const Json = struct {
+    success: bool,
+    errorReason: ?[]const u8 = null,
+    payer: ?[]const u8 = null,
+    transaction: []const u8,
+    network: []const u8,
+    amount: ?[]const u8 = null,
+    extensions: ?std.json.ArrayHashMap(std.json.Value) = null,
+
+    fn toSettleResponse(self: Json) SettleResponse {
+        return .{
+            .success = self.success,
+            .error_reason = self.errorReason,
+            .payer = self.payer,
+            .transaction = self.transaction,
+            .network = self.network,
+            .amount = self.amount,
+            .extensions = if (self.extensions) |value| value.map else null,
+        };
     }
 };
 
@@ -283,4 +332,42 @@ test "jsonStringify writes settlement result and optional fields" {
     try std.testing.expectEqualStrings(
         \\{"success":false,"errorReason":"settlement_pending","payer":"payer","transaction":"tx","network":"eip155:1","amount":"100","extensions":{}}
     , writer.buffered());
+}
+
+test "parse maps SettleResponse fields and extensions" {
+    const input =
+        \\{"success":false,"errorReason":"settlement_pending","payer":"payer","transaction":"tx","network":"eip155:1","amount":"100","extensions":{"example":true}}
+    ;
+
+    var storage: [4096]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&storage);
+    var reader: std.Io.Reader = .fixed(input);
+
+    const response = try SettleResponse.parse(fba.allocator(), &reader, .{});
+
+    try std.testing.expect(!response.success);
+    try std.testing.expectEqualStrings(
+        "settlement_pending",
+        response.error_reason.?,
+    );
+    try std.testing.expectEqualStrings("payer", response.payer.?);
+    try std.testing.expectEqualStrings("tx", response.transaction);
+    try std.testing.expectEqualStrings("eip155:1", response.network);
+    try std.testing.expectEqualStrings("100", response.amount.?);
+    try std.testing.expect(response.extensions.?.get("example").?.bool);
+}
+
+test "parse enforces custom limits" {
+    var storage: [1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&storage);
+    var reader: std.Io.Reader = .fixed(
+        \\{"success":true,"transaction":"abcd","network":"eip155:1"}
+    );
+
+    try std.testing.expectError(
+        error.TransactionTooLong,
+        SettleResponse.parse(fba.allocator(), &reader, .{
+            .limits = .{ .max_transaction_bytes = 3 },
+        }),
+    );
 }

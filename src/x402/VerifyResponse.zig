@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const json_limits = @import("json_limits.zig");
+const json_parse = @import("json_parse.zig");
 
 const VerifyResponse = @This();
 
@@ -119,6 +120,48 @@ pub const Limits = struct {
                 limits.max_extra_string_bytes,
             ) catch return LimitError.ExtraTooLong;
         }
+    }
+};
+
+pub const ParseOptions = struct {
+    limits: Limits = .{},
+};
+
+/// Reads one JSON object. Pass a reader bounded to this message.
+pub fn parse(
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    options: ParseOptions,
+) !VerifyResponse {
+    const response = try json_parse.parse(VerifyResponse, allocator, reader);
+    try options.limits.check(response);
+    return response;
+}
+
+pub fn jsonParse(
+    allocator: std.mem.Allocator,
+    source: anytype,
+    options: std.json.ParseOptions,
+) !VerifyResponse {
+    const json = try std.json.innerParse(Json, allocator, source, options);
+    return json.toVerifyResponse();
+}
+
+const Json = struct {
+    isValid: bool,
+    invalidReason: ?[]const u8 = null,
+    payer: ?[]const u8 = null,
+    extensions: ?std.json.ArrayHashMap(std.json.Value) = null,
+    extra: ?std.json.ArrayHashMap(std.json.Value) = null,
+
+    fn toVerifyResponse(self: Json) VerifyResponse {
+        return .{
+            .is_valid = self.isValid,
+            .invalid_reason = self.invalidReason,
+            .payer = self.payer,
+            .extensions = if (self.extensions) |value| value.map else null,
+            .extra = if (self.extra) |value| value.map else null,
+        };
     }
 };
 
@@ -246,4 +289,43 @@ test "jsonStringify writes verification result and optional fields" {
     try std.testing.expectEqualStrings(
         \\{"isValid":false,"invalidReason":"invalid_signature","payer":"payer","extensions":{},"extra":{}}
     , writer.buffered());
+}
+
+test "parse maps VerifyResponse fields and maps" {
+    const input =
+        \\{"isValid":false,"invalidReason":"invalid_signature","payer":"payer","extensions":{"example":true},"extra":{"detail":"signature"}}
+    ;
+
+    var storage: [4096]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&storage);
+    var reader: std.Io.Reader = .fixed(input);
+
+    const response = try VerifyResponse.parse(fba.allocator(), &reader, .{});
+
+    try std.testing.expect(!response.is_valid);
+    try std.testing.expectEqualStrings(
+        "invalid_signature",
+        response.invalid_reason.?,
+    );
+    try std.testing.expectEqualStrings("payer", response.payer.?);
+    try std.testing.expect(response.extensions.?.get("example").?.bool);
+    try std.testing.expectEqualStrings(
+        "signature",
+        response.extra.?.get("detail").?.string,
+    );
+}
+
+test "parse enforces custom limits" {
+    var storage: [1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&storage);
+    var reader: std.Io.Reader = .fixed(
+        \\{"isValid":false,"invalidReason":"abcd"}
+    );
+
+    try std.testing.expectError(
+        error.InvalidReasonTooLong,
+        VerifyResponse.parse(fba.allocator(), &reader, .{
+            .limits = .{ .max_invalid_reason_bytes = 3 },
+        }),
+    );
 }

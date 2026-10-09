@@ -6,6 +6,7 @@
 //! Slices borrow caller-owned memory, which must remain valid while the resource information is in use.
 
 const std = @import("std");
+const json_parse = @import("json_parse.zig");
 
 const ResourceInfo = @This();
 
@@ -132,6 +133,52 @@ pub const Limits = struct {
             if (value.len > max_icon_url_bytes)
                 return LimitError.IconUrlTooLong;
         }
+    }
+};
+
+pub const ParseOptions = struct {
+    limits: Limits = .{},
+};
+
+/// Reads one JSON object. Pass a reader bounded to this message.
+pub fn parse(
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    options: ParseOptions,
+) !ResourceInfo {
+    const resource = try json_parse.parse(ResourceInfo, allocator, reader);
+    try options.limits.check(resource); // yes, we already used the memory.
+    // But this allows us to use standard parser
+
+    return resource;
+}
+
+pub fn jsonParse(
+    allocator: std.mem.Allocator,
+    source: anytype,
+    options: std.json.ParseOptions,
+) !ResourceInfo {
+    const json = try std.json.innerParse(Json, allocator, source, options);
+    return json.toResourceInfo();
+}
+
+const Json = struct {
+    url: []const u8,
+    description: ?[]const u8 = null,
+    mimeType: ?[]const u8 = null,
+    serviceName: ?[]const u8 = null,
+    tags: ?[]const []const u8 = null,
+    iconUrl: ?[]const u8 = null,
+
+    fn toResourceInfo(self: Json) ResourceInfo {
+        return .{
+            .url = self.url,
+            .description = self.description,
+            .mime_type = self.mimeType,
+            .service_name = self.serviceName,
+            .tags = self.tags,
+            .icon_url = self.iconUrl,
+        };
     }
 };
 
@@ -299,4 +346,40 @@ test "jsonStringify writes protocol fields and omits absent optionals" {
             \\{"url":"https://example.com","description":"","mimeType":"application/json","serviceName":"Example","tags":["api","paid"],"iconUrl":"https://example.com/icon.png"}
         , writer.buffered());
     }
+}
+
+test "parse maps protocol fields to ResourceInfo" {
+    const input =
+        \\{"url":"url","description":"description","mimeType":"application/json","serviceName":"Example","tags":["api","paid"],"iconUrl":"icon","unknown":{"value":1}}
+    ;
+
+    var storage: [4096]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&storage);
+    var reader: std.Io.Reader = .fixed(input);
+
+    const resource = try ResourceInfo.parse(fba.allocator(), &reader, .{});
+
+    try std.testing.expectEqualStrings("url", resource.url);
+    try std.testing.expectEqualStrings("description", resource.description.?);
+    try std.testing.expectEqualStrings("application/json", resource.mime_type.?);
+    try std.testing.expectEqualStrings("Example", resource.service_name.?);
+    try std.testing.expectEqual(@as(usize, 2), resource.tags.?.len);
+    try std.testing.expectEqualStrings("api", resource.tags.?[0]);
+    try std.testing.expectEqualStrings("paid", resource.tags.?[1]);
+    try std.testing.expectEqualStrings("icon", resource.icon_url.?);
+}
+
+test "parse enforces custom limits" {
+    var storage: [1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&storage);
+    var reader: std.Io.Reader = .fixed(
+        \\{"url":"abcd"}
+    );
+
+    try std.testing.expectError(
+        error.UrlTooLong,
+        ResourceInfo.parse(fba.allocator(), &reader, .{
+            .limits = .{ .max_url_bytes = 3 },
+        }),
+    );
 }

@@ -10,6 +10,7 @@ const std = @import("std");
 const ResourceInfo = @import("ResourceInfo.zig");
 const PaymentRequirements = @import("PaymentRequirements.zig");
 const json_limits = @import("json_limits.zig");
+const json_parse = @import("json_parse.zig");
 
 const PaymentPayload = @This();
 
@@ -107,6 +108,48 @@ pub const Limits = struct {
                 limits.max_extensions_string_bytes,
             ) catch return LimitError.ExtensionsTooLong;
         }
+    }
+};
+
+pub const ParseOptions = struct {
+    limits: Limits = .{},
+};
+
+/// Reads one JSON object. Pass a reader bounded to this message.
+pub fn parse(
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    options: ParseOptions,
+) !PaymentPayload {
+    const payload = try json_parse.parse(PaymentPayload, allocator, reader);
+    try options.limits.check(payload);
+    return payload;
+}
+
+pub fn jsonParse(
+    allocator: std.mem.Allocator,
+    source: anytype,
+    options: std.json.ParseOptions,
+) !PaymentPayload {
+    const json = try std.json.innerParse(Json, allocator, source, options);
+    return json.toPaymentPayload();
+}
+
+const Json = struct {
+    x402Version: u8,
+    resource: ?ResourceInfo = null,
+    accepted: PaymentRequirements,
+    payload: std.json.ArrayHashMap(std.json.Value),
+    extensions: ?std.json.ArrayHashMap(std.json.Value) = null,
+
+    fn toPaymentPayload(self: Json) PaymentPayload {
+        return .{
+            .x402_version = self.x402Version,
+            .resource = self.resource,
+            .accepted = self.accepted,
+            .payload = self.payload.map,
+            .extensions = if (self.extensions) |value| value.map else null,
+        };
     }
 };
 
@@ -275,4 +318,48 @@ test "jsonStringify writes payment payload and optional fields" {
     try std.testing.expectEqualStrings(
         \\{"x402Version":2,"resource":{"url":"url"},"accepted":{"scheme":"exact","network":"eip155:1","amount":"100","asset":"asset","payTo":"recipient","maxTimeoutSeconds":60},"payload":{},"extensions":{}}
     , writer.buffered());
+}
+
+test "parse maps PaymentPayload and nested types" {
+    const input =
+        \\{"x402Version":2,"resource":{"url":"url","mimeType":"application/json"},"accepted":{"scheme":"exact","network":"eip155:1","amount":"100","asset":"asset","payTo":"recipient","maxTimeoutSeconds":60},"payload":{"signature":"sig"},"extensions":{}}
+    ;
+
+    var storage: [8192]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&storage);
+    var reader: std.Io.Reader = .fixed(input);
+
+    const payment = try PaymentPayload.parse(fba.allocator(), &reader, .{});
+
+    try std.testing.expectEqual(@as(u8, 2), payment.x402_version);
+    try std.testing.expectEqualStrings("url", payment.resource.?.url);
+    try std.testing.expectEqualStrings(
+        "application/json",
+        payment.resource.?.mime_type.?,
+    );
+    try std.testing.expectEqualStrings("recipient", payment.accepted.pay_to);
+
+    try std.testing.expectEqual(@as(usize, 1), payment.payload.count());
+    try std.testing.expectEqualStrings(
+        "sig",
+        payment.payload.get("signature").?.string,
+    );
+    try std.testing.expectEqual(@as(usize, 0), payment.extensions.?.count());
+}
+
+test "parse enforces custom payload limit" {
+    const input =
+        \\{"x402Version":2,"accepted":{"scheme":"exact","network":"eip155:1","amount":"100","asset":"asset","payTo":"recipient","maxTimeoutSeconds":60},"payload":{"a":"b"}}
+    ;
+
+    var storage: [4096]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&storage);
+    var reader: std.Io.Reader = .fixed(input);
+
+    try std.testing.expectError(
+        error.PayloadTooLong,
+        PaymentPayload.parse(fba.allocator(), &reader, .{
+            .limits = .{ .max_payload_string_bytes = 1 },
+        }),
+    );
 }
