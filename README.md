@@ -7,6 +7,7 @@ An x402 v2 core library with predictable latency and bounded memory use.
 - Types: `done`
 - JSON parsing: `done`
 - JSON serialization: `done`
+- Message validation against spec: `in progress`
 
 
 ## Why I am building this
