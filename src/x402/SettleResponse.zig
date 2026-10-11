@@ -9,6 +9,7 @@
 const std = @import("std");
 const json_limits = @import("json_limits.zig");
 const json_parse = @import("json_parse.zig");
+const Amount = @import("Amount.zig");
 
 const SettleResponse = @This();
 
@@ -31,7 +32,7 @@ transaction: []const u8,
 network: []const u8, // https://github.com/ChainAgnostic/CAIPs/blob/main/CAIPs/caip-2.md
 
 /// The actual amount settled in atomic units (omitted if not applicable).
-amount: ?[]const u8 = null,
+amount: ?Amount = null,
 
 /// Protocol extensions data.
 extensions: ?std.json.ObjectMap = null,
@@ -128,7 +129,7 @@ pub const Limits = struct {
             return error.NetworkTooLong;
 
         if (response.amount) |amount| {
-            if (amount.len > limits.max_amount_bytes)
+            if (amount.bytes.len > limits.max_amount_bytes)
                 return error.AmountTooLong;
         }
 
@@ -167,7 +168,7 @@ pub fn jsonParse(
     options: std.json.ParseOptions,
 ) !SettleResponse {
     const json = try std.json.innerParse(Json, allocator, source, options);
-    return json.toSettleResponse();
+    return json.toSettleResponse() catch return error.InvalidNumber;
 }
 
 const Json = struct {
@@ -179,14 +180,14 @@ const Json = struct {
     amount: ?[]const u8 = null,
     extensions: ?std.json.ArrayHashMap(std.json.Value) = null,
 
-    fn toSettleResponse(self: Json) SettleResponse {
+    fn toSettleResponse(self: Json) error{InvalidAmount}!SettleResponse {
         return .{
             .success = self.success,
             .error_reason = self.errorReason,
             .payer = self.payer,
             .transaction = self.transaction,
             .network = self.network,
-            .amount = self.amount,
+            .amount = if (self.amount) |bytes| try Amount.parse(bytes) else null,
             .extensions = if (self.extensions) |value| value.map else null,
         };
     }
@@ -254,7 +255,7 @@ test "Limits.check accepts boundaries and identifies exceeded fields" {
         .payer = "pp",
         .transaction = "tttt",
         .network = &@as([max_network_bytes]u8, @splat('n')),
-        .amount = "1",
+        .amount = try Amount.parse("1"),
         .extensions = parsed.value.object,
     };
     try limits.check(response);
@@ -264,7 +265,6 @@ test "Limits.check accepts boundaries and identifies exceeded fields" {
         .{ "payer", 2, error.PayerTooLong },
         .{ "transaction", 4, error.TransactionTooLong },
         .{ "network", max_network_bytes, error.NetworkTooLong },
-        .{ "amount", 1, error.AmountTooLong },
     };
     inline for (cases) |case| {
         var oversized = response;
@@ -272,6 +272,13 @@ test "Limits.check accepts boundaries and identifies exceeded fields" {
             &@as([case[1] + 1]u8, @splat('x'));
         try std.testing.expectError(case[2], limits.check(oversized));
     }
+
+    var oversized_amount = response;
+    oversized_amount.amount = try Amount.parse("12");
+    try std.testing.expectError(
+        error.AmountTooLong,
+        limits.check(oversized_amount),
+    );
 
     const extension_cases = .{
         .{ "max_extensions", 0, error.TooManyExtensions },
@@ -301,9 +308,14 @@ test "Limits.check accepts boundaries and identifies exceeded fields" {
     try zero_limits.check(empty);
     empty.error_reason = "";
     empty.payer = "";
-    empty.amount = "";
     empty.extensions = .{};
     try zero_limits.check(empty);
+
+    empty.amount = try Amount.parse("0");
+    try std.testing.expectError(
+        error.AmountTooLong,
+        zero_limits.check(empty),
+    );
 }
 
 test "jsonStringify writes settlement result and optional fields" {
@@ -324,7 +336,7 @@ test "jsonStringify writes settlement result and optional fields" {
     response.error_reason = "settlement_pending";
     response.payer = "payer";
     response.transaction = "tx";
-    response.amount = "100";
+    response.amount = try Amount.parse("100");
     response.extensions = .{};
     writer = .fixed(&buffer);
 
@@ -353,7 +365,7 @@ test "parse maps SettleResponse fields and extensions" {
     try std.testing.expectEqualStrings("payer", response.payer.?);
     try std.testing.expectEqualStrings("tx", response.transaction);
     try std.testing.expectEqualStrings("eip155:1", response.network);
-    try std.testing.expectEqualStrings("100", response.amount.?);
+    try std.testing.expectEqualStrings("100", response.amount.?.bytes);
     try std.testing.expect(response.extensions.?.get("example").?.bool);
 }
 
@@ -370,4 +382,56 @@ test "parse enforces custom limits" {
             .limits = .{ .max_transaction_bytes = 3 },
         }),
     );
+}
+test "parse accepts absent and null amount" {
+    const inputs = [_][]const u8{
+        \\{"success":true,"transaction":"tx","network":"eip155:1"}
+        ,
+        \\{"success":true,"transaction":"tx","network":"eip155:1","amount":null}
+        ,
+    };
+
+    for (inputs) |input| {
+        var storage: [4096]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&storage);
+        var reader: std.Io.Reader = .fixed(input);
+
+        const response = try SettleResponse.parse(
+            fba.allocator(),
+            &reader,
+            .{},
+        );
+        try std.testing.expect(response.amount == null);
+    }
+}
+
+test "parse rejects invalid amount" {
+    const cases = .{
+        .{
+            \\{"success":true,"transaction":"tx","network":"eip155:1","amount":"01"}
+            ,
+            error.InvalidNumber,
+        },
+        .{
+            \\{"success":true,"transaction":"tx","network":"eip155:1","amount":""}
+            ,
+            error.InvalidNumber,
+        },
+        .{
+            \\{"success":true,"transaction":"tx","network":"eip155:1","amount":100}
+            ,
+            error.UnexpectedToken,
+        },
+    };
+
+    inline for (cases) |case| {
+        var storage: [4096]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&storage);
+        var reader: std.Io.Reader = .fixed(case[0]);
+
+        try std.testing.expectError(
+            case[1],
+            SettleResponse.parse(fba.allocator(), &reader, .{}),
+        );
+    }
 }

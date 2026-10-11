@@ -9,6 +9,7 @@
 const std = @import("std");
 const ResourceInfo = @import("ResourceInfo.zig");
 const PaymentRequirements = @import("PaymentRequirements.zig");
+const Amount = @import("Amount.zig");
 const json_limits = @import("json_limits.zig");
 const json_parse = @import("json_parse.zig");
 
@@ -231,7 +232,7 @@ test "Limits.check accepts boundaries and identifies exceeded fields" {
         .accepted = .{
             .scheme = "exact",
             .network = "eip155:1",
-            .amount = "1",
+            .amount = try Amount.parse("1"),
             .asset = "asset",
             .pay_to = "recipient",
             .max_timeout_seconds = 60,
@@ -294,7 +295,7 @@ test "jsonStringify writes payment payload and optional fields" {
         .accepted = .{
             .scheme = "exact",
             .network = "eip155:1",
-            .amount = "100",
+            .amount = try Amount.parse("100"),
             .asset = "asset",
             .pay_to = "recipient",
             .max_timeout_seconds = 60,
@@ -345,6 +346,7 @@ test "parse maps PaymentPayload and nested types" {
         payment.payload.get("signature").?.string,
     );
     try std.testing.expectEqual(@as(usize, 0), payment.extensions.?.count());
+    try std.testing.expectEqualStrings("100", payment.accepted.amount.bytes);
 }
 
 test "parse enforces custom payload limit" {
@@ -361,5 +363,20 @@ test "parse enforces custom payload limit" {
         PaymentPayload.parse(fba.allocator(), &reader, .{
             .limits = .{ .max_payload_string_bytes = 1 },
         }),
+    );
+}
+
+test "parse rejects invalid amount in accepted" {
+    const input =
+        \\{"x402Version":2,"accepted":{"scheme":"exact","network":"eip155:1","amount":"01","asset":"asset","payTo":"recipient","maxTimeoutSeconds":60},"payload":{}}
+    ;
+
+    var storage: [8192]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&storage);
+    var reader: std.Io.Reader = .fixed(input);
+
+    try std.testing.expectError(
+        error.InvalidNumber,
+        PaymentPayload.parse(fba.allocator(), &reader, .{}),
     );
 }

@@ -9,6 +9,7 @@
 const std = @import("std");
 const ResourceInfo = @import("ResourceInfo.zig");
 const PaymentRequirements = @import("PaymentRequirements.zig");
+const Amount = @import("Amount.zig");
 const json_limits = @import("json_limits.zig");
 const json_parse = @import("json_parse.zig");
 
@@ -204,7 +205,7 @@ test "Limits.check accepts boundaries and identifies exceeded fields" {
     const requirements: PaymentRequirements = .{
         .scheme = "sss",
         .network = "eip155:1",
-        .amount = "1",
+        .amount = try Amount.parse("1"),
         .asset = "asset",
         .pay_to = "recipient",
         .max_timeout_seconds = 60,
@@ -283,7 +284,7 @@ test "jsonStringify writes nested payment requirements and optional fields" {
         .accepts = &.{.{
             .scheme = "exact",
             .network = "eip155:1",
-            .amount = "100",
+            .amount = try Amount.parse("100"),
             .asset = "asset",
             .pay_to = "recipient",
             .max_timeout_seconds = 60,
@@ -330,6 +331,8 @@ test "parse maps PaymentRequired and nested types" {
     try std.testing.expectEqual(@as(usize, 1), response.accepts.len);
     try std.testing.expectEqualStrings("recipient", response.accepts[0].pay_to);
 
+    try std.testing.expectEqualStrings("100", response.accepts[0].amount.bytes);
+
     const extensions = response.extensions.?;
     try std.testing.expectEqual(@as(usize, 1), extensions.count());
     try std.testing.expect(extensions.get("example").?.bool);
@@ -351,5 +354,20 @@ test "parse enforces custom nested limits" {
                 .resource = .{ .max_url_bytes = 3 },
             },
         }),
+    );
+}
+
+test "parse rejects invalid amount in accepts" {
+    const input =
+        \\{"x402Version":2,"resource":{"url":"url"},"accepts":[{"scheme":"exact","network":"eip155:1","amount":"01","asset":"asset","payTo":"recipient","maxTimeoutSeconds":60}]}
+    ;
+
+    var storage: [8192]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&storage);
+    var reader: std.Io.Reader = .fixed(input);
+
+    try std.testing.expectError(
+        error.InvalidNumber,
+        PaymentRequired.parse(fba.allocator(), &reader, .{}),
     );
 }
