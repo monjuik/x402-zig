@@ -10,6 +10,7 @@ const std = @import("std");
 const json_limits = @import("json_limits.zig");
 const json_parse = @import("json_parse.zig");
 const Amount = @import("Amount.zig");
+const Network = @import("Network.zig");
 
 const PaymentRequirements = @This();
 
@@ -19,7 +20,7 @@ const PaymentRequirements = @This();
 scheme: []const u8,
 
 /// Blockchain network identifier in CAIP-2 format (e.g., “eip155:84532”).
-network: []const u8, // https://github.com/ChainAgnostic/CAIPs/blob/main/CAIPs/caip-2.md
+network: Network,
 
 /// Required payment amount in atomic token units.
 amount: Amount,
@@ -36,9 +37,6 @@ max_timeout_seconds: u32,
 /// Additional information.
 /// Reserved protocol keys: assetTransferMethod, paymentFlow; other keys are scheme-specific.
 extra: ?std.json.ObjectMap = null,
-
-// Specification limits.
-pub const max_network_bytes = 41; // inherited from CAIP-2: 8 + 1 + 32 = 41
 
 pub fn jsonStringify(self: PaymentRequirements, jw: anytype) !void {
     try jw.beginObject();
@@ -90,7 +88,7 @@ pub const Limits = struct {
 
     /// Maximum byte length for all decoded string values.
     pub fn maxStringBytes(limits: Limits) error{Overflow}!usize {
-        var total: usize = max_network_bytes;
+        var total: usize = Network.max_network_bytes;
         total = try std.math.add(usize, total, limits.max_scheme_bytes);
         total = try std.math.add(usize, total, limits.max_amount_bytes);
         total = try std.math.add(usize, total, limits.max_asset_bytes);
@@ -104,7 +102,7 @@ pub const Limits = struct {
         if (requirements.scheme.len > limits.max_scheme_bytes)
             return error.SchemeTooLong;
 
-        if (requirements.network.len > max_network_bytes)
+        if (requirements.network.bytes.len > Network.max_network_bytes)
             return error.NetworkTooLong;
 
         if (requirements.amount.bytes.len > limits.max_amount_bytes)
@@ -148,7 +146,10 @@ pub fn jsonParse(
     options: std.json.ParseOptions,
 ) !PaymentRequirements {
     const json = try std.json.innerParse(Json, allocator, source, options);
-    return json.toPaymentRequirements() catch return error.InvalidNumber;
+    return json.toPaymentRequirements() catch |err| switch (err) {
+        error.InvalidAmount => error.InvalidNumber,
+        error.InvalidNetwork => error.UnexpectedToken,
+    };
 }
 
 const Json = struct {
@@ -160,10 +161,10 @@ const Json = struct {
     maxTimeoutSeconds: u32,
     extra: ?std.json.ArrayHashMap(std.json.Value) = null,
 
-    fn toPaymentRequirements(self: Json) error{InvalidAmount}!PaymentRequirements {
+    fn toPaymentRequirements(self: Json) error{ InvalidAmount, InvalidNetwork }!PaymentRequirements {
         return .{
             .scheme = self.scheme,
-            .network = self.network,
+            .network = try Network.parse(self.network),
             .amount = try Amount.parse(self.amount),
             .asset = self.asset,
             .pay_to = self.payTo,
@@ -184,7 +185,7 @@ test "Limits.maxStringBytes handles custom limits and overflow" {
     try std.testing.expectEqual(@as(usize, 56), try limits.maxStringBytes());
 
     limits = .{
-        .max_scheme_bytes = std.math.maxInt(usize) - max_network_bytes,
+        .max_scheme_bytes = std.math.maxInt(usize) - Network.max_network_bytes,
         .max_amount_bytes = 0,
         .max_asset_bytes = 0,
         .max_pay_to_bytes = 0,
@@ -209,7 +210,7 @@ test "Limits.check accepts boundaries and identifies exceeded fields" {
     };
     const requirements: PaymentRequirements = .{
         .scheme = "sss",
-        .network = &@as([max_network_bytes]u8, @splat('n')),
+        .network = try Network.parse("chainstd:8c3444cf8970a9e41a706fab93e7a6c4"),
         .amount = try Amount.parse("123"),
         .asset = "aaa",
         .pay_to = "ppp",
@@ -219,7 +220,6 @@ test "Limits.check accepts boundaries and identifies exceeded fields" {
 
     const cases = .{
         .{ "scheme", 3, error.SchemeTooLong },
-        .{ "network", max_network_bytes, error.NetworkTooLong },
         .{ "asset", 3, error.AssetTooLong },
         .{ "pay_to", 3, error.PayToTooLong },
     };
@@ -228,6 +228,13 @@ test "Limits.check accepts boundaries and identifies exceeded fields" {
         @field(oversized, case[0]) = &@as([(case[1] + 1)]u8, @splat('x'));
         try std.testing.expectError(case[2], limits.check(oversized));
     }
+
+    // Deliberately bypass parse to test the length guard independently.
+    var oversized_network = requirements;
+    oversized_network.network = .{
+        .bytes = &@as([Network.max_network_bytes + 1]u8, @splat('x')),
+    };
+    try std.testing.expectError(error.NetworkTooLong, limits.check(oversized_network));
 
     var oversized_amount = requirements;
     oversized_amount.amount = try Amount.parse("1234");
@@ -259,7 +266,7 @@ test "Limits.check accepts boundaries and identifies exceeded fields" {
 test "jsonStringify writes protocol fields and optional extra" {
     var requirements: PaymentRequirements = .{
         .scheme = "exact",
-        .network = "eip155:1",
+        .network = try Network.parse("eip155:1"),
         .amount = try Amount.parse("100"),
         .asset = "asset",
         .pay_to = "recipient",
@@ -307,7 +314,7 @@ test "parse maps protocol fields and extra to PaymentRequirements" {
     );
 
     try std.testing.expectEqualStrings("exact", requirements.scheme);
-    try std.testing.expectEqualStrings("eip155:1", requirements.network);
+    try std.testing.expectEqualStrings("eip155:1", requirements.network.bytes);
     try std.testing.expectEqualStrings("100", requirements.amount.bytes);
     try std.testing.expectEqualStrings("asset", requirements.asset);
     try std.testing.expectEqualStrings("recipient", requirements.pay_to);
@@ -336,6 +343,28 @@ test "parse enforces custom limits" {
             .limits = .{ .max_extra_string_bytes = 1 },
         }),
     );
+}
+
+test "parse rejects invalid networks" {
+    const cases = [_][]const u8{
+        \\{"scheme":"exact","network":"eip155:*","amount":"100","asset":"asset","payTo":"recipient","maxTimeoutSeconds":60}
+        ,
+        \\{"scheme":"exact","network":"eip155","amount":"100","asset":"asset","payTo":"recipient","maxTimeoutSeconds":60}
+        ,
+        \\{"scheme":"exact","network":"","amount":"100","asset":"asset","payTo":"recipient","maxTimeoutSeconds":60}
+        ,
+    };
+
+    for (cases) |input| {
+        var storage: [4096]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&storage);
+        var reader: std.Io.Reader = .fixed(input);
+
+        try std.testing.expectError(
+            error.UnexpectedToken,
+            PaymentRequirements.parse(fba.allocator(), &reader, .{}),
+        );
+    }
 }
 
 test "parse rejects amount with a leading zero" {

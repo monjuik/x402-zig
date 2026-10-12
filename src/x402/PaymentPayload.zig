@@ -10,6 +10,7 @@ const std = @import("std");
 const ResourceInfo = @import("ResourceInfo.zig");
 const PaymentRequirements = @import("PaymentRequirements.zig");
 const Amount = @import("Amount.zig");
+const Network = @import("Network.zig");
 const json_limits = @import("json_limits.zig");
 const json_parse = @import("json_parse.zig");
 
@@ -231,7 +232,7 @@ test "Limits.check accepts boundaries and identifies exceeded fields" {
         .resource = .{ .url = "url" },
         .accepted = .{
             .scheme = "exact",
-            .network = "eip155:1",
+            .network = try Network.parse("eip155:1"),
             .amount = try Amount.parse("1"),
             .asset = "asset",
             .pay_to = "recipient",
@@ -294,7 +295,7 @@ test "jsonStringify writes payment payload and optional fields" {
         .x402_version = 2,
         .accepted = .{
             .scheme = "exact",
-            .network = "eip155:1",
+            .network = try Network.parse("eip155:1"),
             .amount = try Amount.parse("100"),
             .asset = "asset",
             .pay_to = "recipient",
@@ -363,6 +364,21 @@ test "parse enforces custom payload limit" {
         PaymentPayload.parse(fba.allocator(), &reader, .{
             .limits = .{ .max_payload_string_bytes = 1 },
         }),
+    );
+}
+
+test "parse rejects a network wildcard in accepted" {
+    const input =
+        \\{"x402Version":2,"accepted":{"scheme":"exact","network":"eip155:*","amount":"100","asset":"asset","payTo":"recipient","maxTimeoutSeconds":60},"payload":{}}
+    ;
+
+    var storage: [8192]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&storage);
+    var reader: std.Io.Reader = .fixed(input);
+
+    try std.testing.expectError(
+        error.UnexpectedToken,
+        PaymentPayload.parse(fba.allocator(), &reader, .{}),
     );
 }
 

@@ -10,6 +10,7 @@ const std = @import("std");
 const json_limits = @import("json_limits.zig");
 const json_parse = @import("json_parse.zig");
 const Amount = @import("Amount.zig");
+const Network = @import("Network.zig");
 
 const SettleResponse = @This();
 
@@ -29,16 +30,13 @@ payer: ?[]const u8 = null,
 transaction: []const u8,
 
 /// Blockchain network identifier in CAIP-2 format.
-network: []const u8, // https://github.com/ChainAgnostic/CAIPs/blob/main/CAIPs/caip-2.md
+network: Network,
 
 /// The actual amount settled in atomic units (omitted if not applicable).
 amount: ?Amount = null,
 
 /// Protocol extensions data.
 extensions: ?std.json.ObjectMap = null,
-
-// Specification limits.
-pub const max_network_bytes = 41; // inherited from CAIP-2: 8 + 1 + 32 = 41
 
 pub fn jsonStringify(self: SettleResponse, jw: anytype) !void {
     try jw.beginObject();
@@ -98,7 +96,7 @@ pub const Limits = struct {
 
     /// Maximum byte length for all decoded string values.
     pub fn maxStringBytes(limits: Limits) error{Overflow}!usize {
-        var total: usize = max_network_bytes;
+        var total: usize = Network.max_network_bytes;
         total = try std.math.add(usize, total, limits.max_error_reason_bytes);
         total = try std.math.add(usize, total, limits.max_payer_bytes);
         total = try std.math.add(usize, total, limits.max_transaction_bytes);
@@ -125,7 +123,7 @@ pub const Limits = struct {
         if (response.transaction.len > limits.max_transaction_bytes)
             return error.TransactionTooLong;
 
-        if (response.network.len > max_network_bytes)
+        if (response.network.bytes.len > Network.max_network_bytes)
             return error.NetworkTooLong;
 
         if (response.amount) |amount| {
@@ -168,7 +166,10 @@ pub fn jsonParse(
     options: std.json.ParseOptions,
 ) !SettleResponse {
     const json = try std.json.innerParse(Json, allocator, source, options);
-    return json.toSettleResponse() catch return error.InvalidNumber;
+    return json.toSettleResponse() catch |err| switch (err) {
+        error.InvalidAmount => error.InvalidNumber,
+        error.InvalidNetwork => error.UnexpectedToken,
+    };
 }
 
 const Json = struct {
@@ -180,13 +181,13 @@ const Json = struct {
     amount: ?[]const u8 = null,
     extensions: ?std.json.ArrayHashMap(std.json.Value) = null,
 
-    fn toSettleResponse(self: Json) error{InvalidAmount}!SettleResponse {
+    fn toSettleResponse(self: Json) error{ InvalidAmount, InvalidNetwork }!SettleResponse {
         return .{
             .success = self.success,
             .error_reason = self.errorReason,
             .payer = self.payer,
             .transaction = self.transaction,
-            .network = self.network,
+            .network = try Network.parse(self.network),
             .amount = if (self.amount) |bytes| try Amount.parse(bytes) else null,
             .extensions = if (self.extensions) |value| value.map else null,
         };
@@ -211,7 +212,7 @@ test "Limits.maxStringBytes handles custom limits and overflow" {
     try std.testing.expectEqual(@as(usize, 51), try limits.maxStringBytes());
 
     limits = .{
-        .max_error_reason_bytes = max - max_network_bytes,
+        .max_error_reason_bytes = max - Network.max_network_bytes,
         .max_payer_bytes = 0,
         .max_transaction_bytes = 0,
         .max_amount_bytes = 0,
@@ -254,7 +255,7 @@ test "Limits.check accepts boundaries and identifies exceeded fields" {
         .error_reason = "err",
         .payer = "pp",
         .transaction = "tttt",
-        .network = &@as([max_network_bytes]u8, @splat('n')),
+        .network = try Network.parse("chainstd:8c3444cf8970a9e41a706fab93e7a6c4"),
         .amount = try Amount.parse("1"),
         .extensions = parsed.value.object,
     };
@@ -264,7 +265,6 @@ test "Limits.check accepts boundaries and identifies exceeded fields" {
         .{ "error_reason", 3, error.ErrorReasonTooLong },
         .{ "payer", 2, error.PayerTooLong },
         .{ "transaction", 4, error.TransactionTooLong },
-        .{ "network", max_network_bytes, error.NetworkTooLong },
     };
     inline for (cases) |case| {
         var oversized = response;
@@ -272,6 +272,13 @@ test "Limits.check accepts boundaries and identifies exceeded fields" {
             &@as([case[1] + 1]u8, @splat('x'));
         try std.testing.expectError(case[2], limits.check(oversized));
     }
+
+    // Deliberately bypass parse to test the length guard independently.
+    var oversized_network = response;
+    oversized_network.network = .{
+        .bytes = &@as([Network.max_network_bytes + 1]u8, @splat('x')),
+    };
+    try std.testing.expectError(error.NetworkTooLong, limits.check(oversized_network));
 
     var oversized_amount = response;
     oversized_amount.amount = try Amount.parse("12");
@@ -301,7 +308,7 @@ test "Limits.check accepts boundaries and identifies exceeded fields" {
     var empty: SettleResponse = .{
         .success = true,
         .transaction = "",
-        .network = "",
+        .network = try Network.parse("eip155:1"),
     };
 
     // Absent and empty optional fields fit zero budgets.
@@ -322,7 +329,7 @@ test "jsonStringify writes settlement result and optional fields" {
     var response: SettleResponse = .{
         .success = false,
         .transaction = "",
-        .network = "eip155:1",
+        .network = try Network.parse("eip155:1"),
     };
 
     var buffer: [256]u8 = undefined;
@@ -364,9 +371,35 @@ test "parse maps SettleResponse fields and extensions" {
     );
     try std.testing.expectEqualStrings("payer", response.payer.?);
     try std.testing.expectEqualStrings("tx", response.transaction);
-    try std.testing.expectEqualStrings("eip155:1", response.network);
+    try std.testing.expectEqualStrings("eip155:1", response.network.bytes);
     try std.testing.expectEqualStrings("100", response.amount.?.bytes);
     try std.testing.expect(response.extensions.?.get("example").?.bool);
+}
+
+test "parse rejects invalid networks in successful and failed settlements" {
+    const cases = [_][]const u8{
+        \\{"success":true,"transaction":"tx","network":"eip155:*"}
+        ,
+        \\{"success":false,"transaction":"","network":"eip155:*"}
+        ,
+        \\{"success":false,"transaction":"","network":""}
+        ,
+        \\{"success":true,"transaction":"tx","network":"eip155"}
+        ,
+        \\{"success":false,"errorReason":"settlement_pending","transaction":"tx","network":"eip155:*"}
+        ,
+    };
+
+    for (cases) |input| {
+        var storage: [4096]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&storage);
+        var reader: std.Io.Reader = .fixed(input);
+
+        try std.testing.expectError(
+            error.UnexpectedToken,
+            SettleResponse.parse(fba.allocator(), &reader, .{}),
+        );
+    }
 }
 
 test "parse enforces custom limits" {

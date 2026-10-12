@@ -8,6 +8,7 @@ pub const PaymentPayload = @import("x402/PaymentPayload.zig");
 pub const SettleResponse = @import("x402/SettleResponse.zig");
 pub const VerifyResponse = @import("x402/VerifyResponse.zig");
 pub const Amount = @import("x402/Amount.zig");
+pub const Network = @import("x402/Network.zig");
 
 test {
     std.testing.refAllDecls(@This());

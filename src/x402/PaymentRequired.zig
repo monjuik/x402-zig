@@ -10,6 +10,7 @@ const std = @import("std");
 const ResourceInfo = @import("ResourceInfo.zig");
 const PaymentRequirements = @import("PaymentRequirements.zig");
 const Amount = @import("Amount.zig");
+const Network = @import("Network.zig");
 const json_limits = @import("json_limits.zig");
 const json_parse = @import("json_parse.zig");
 
@@ -204,7 +205,7 @@ test "Limits.maxStringBytes handles custom limits and overflow" {
 test "Limits.check accepts boundaries and identifies exceeded fields" {
     const requirements: PaymentRequirements = .{
         .scheme = "sss",
-        .network = "eip155:1",
+        .network = try Network.parse("eip155:1"),
         .amount = try Amount.parse("1"),
         .asset = "asset",
         .pay_to = "recipient",
@@ -283,7 +284,7 @@ test "jsonStringify writes nested payment requirements and optional fields" {
         .resource = .{ .url = "url" },
         .accepts = &.{.{
             .scheme = "exact",
-            .network = "eip155:1",
+            .network = try Network.parse("eip155:1"),
             .amount = try Amount.parse("100"),
             .asset = "asset",
             .pay_to = "recipient",
@@ -354,6 +355,21 @@ test "parse enforces custom nested limits" {
                 .resource = .{ .max_url_bytes = 3 },
             },
         }),
+    );
+}
+
+test "parse rejects a network wildcard in accepts" {
+    const input =
+        \\{"x402Version":2,"resource":{"url":"url"},"accepts":[{"scheme":"exact","network":"eip155:*","amount":"100","asset":"asset","payTo":"recipient","maxTimeoutSeconds":60}]}
+    ;
+
+    var storage: [8192]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&storage);
+    var reader: std.Io.Reader = .fixed(input);
+
+    try std.testing.expectError(
+        error.UnexpectedToken,
+        PaymentRequired.parse(fba.allocator(), &reader, .{}),
     );
 }
 
