@@ -9,6 +9,11 @@ An x402 v2 core library with predictable latency and bounded memory use.
 - JSON serialization: `done`
 - Message validation against spec: `in progress`
 
+## Validation
+
+`validate()` in `PaymentPayload` and `PaymentRequired` accepts only 2 as a protocol version.
+
+`parse()` enforces `Limits`.
 
 ## Why I am building this
 

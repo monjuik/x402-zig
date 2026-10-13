@@ -131,8 +131,14 @@ pub fn parse(
     options: ParseOptions,
 ) !PaymentRequired {
     const response = try json_parse.parse(PaymentRequired, allocator, reader);
+    try response.validate();
     try options.limits.check(response);
     return response;
+}
+
+pub fn validate(self: PaymentRequired) error{UnsupportedVersion}!void {
+    if (self.x402_version != 2)
+        return error.UnsupportedVersion;
 }
 
 pub fn jsonParse(
@@ -386,4 +392,24 @@ test "parse rejects invalid amount in accepts" {
         error.InvalidNumber,
         PaymentRequired.parse(fba.allocator(), &reader, .{}),
     );
+}
+
+test "parse rejects unsupported x402 versions" {
+    for ([_]u8{ 0, 1, 3, 255 }) |version| {
+        var input_buffer: [256]u8 = undefined;
+        const input = try std.fmt.bufPrint(
+            &input_buffer,
+            "{{\"x402Version\":{d},\"resource\":{{\"url\":\"url\"}},\"accepts\":[]}}",
+            .{version},
+        );
+
+        var storage: [4096]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&storage);
+        var reader: std.Io.Reader = .fixed(input);
+
+        try std.testing.expectError(
+            error.UnsupportedVersion,
+            PaymentRequired.parse(fba.allocator(), &reader, .{}),
+        );
+    }
 }

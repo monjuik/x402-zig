@@ -124,8 +124,14 @@ pub fn parse(
     options: ParseOptions,
 ) !PaymentPayload {
     const payload = try json_parse.parse(PaymentPayload, allocator, reader);
+    try payload.validate();
     try options.limits.check(payload);
     return payload;
+}
+
+pub fn validate(self: PaymentPayload) error{UnsupportedVersion}!void {
+    if (self.x402_version != 2)
+        return error.UnsupportedVersion;
 }
 
 pub fn jsonParse(
@@ -395,4 +401,24 @@ test "parse rejects invalid amount in accepted" {
         error.InvalidNumber,
         PaymentPayload.parse(fba.allocator(), &reader, .{}),
     );
+}
+
+test "parse rejects unsupported x402 versions" {
+    for ([_]u8{ 0, 1, 3, 255 }) |version| {
+        var input_buffer: [512]u8 = undefined;
+        const input = try std.fmt.bufPrint(
+            &input_buffer,
+            "{{\"x402Version\":{d},\"accepted\":{{\"scheme\":\"exact\",\"network\":\"eip155:1\",\"amount\":\"100\",\"asset\":\"asset\",\"payTo\":\"recipient\",\"maxTimeoutSeconds\":60}},\"payload\":{{}}}}",
+            .{version},
+        );
+
+        var storage: [4096]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&storage);
+        var reader: std.Io.Reader = .fixed(input);
+
+        try std.testing.expectError(
+            error.UnsupportedVersion,
+            PaymentPayload.parse(fba.allocator(), &reader, .{}),
+        );
+    }
 }
