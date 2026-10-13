@@ -15,6 +15,8 @@ An x402 v2 core library with predictable latency and bounded memory use.
 
 `parse()` enforces `Limits`.
 
+`SettleResponse.validate()` requires a non-empty `transaction` when `errorReason` is `settlement_pending`.
+
 ## Why I am building this
 
 I believe that resource-efficient software has additional value. This library helps deploying x402 components close to the target services.

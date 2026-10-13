@@ -73,6 +73,15 @@ pub fn jsonStringify(self: SettleResponse, jw: anytype) !void {
     try jw.endObject();
 }
 
+pub fn validate(self: SettleResponse) error{MissingTransaction}!void {
+    if (self.error_reason) |reason| {
+        // according to 5.3.2 Field Descriptions
+        // `transaction` MUST be non-empty when `errorReason` is `settlement_pending`
+        if (std.mem.eql(u8, reason, "settlement_pending") and self.transaction.len == 0)
+            return error.MissingTransaction;
+    }
+}
+
 pub const LimitError = error{
     ErrorReasonTooLong,
     PayerTooLong,
@@ -154,6 +163,8 @@ pub fn parse(
     options: ParseOptions,
 ) !SettleResponse {
     const response = try json_parse.parse(SettleResponse, allocator, reader);
+    try response.validate();
+
     try options.limits.check(response); // yes, we already used the memory.
     // But this allows us to use standard parser
 
@@ -466,5 +477,35 @@ test "parse rejects invalid amount" {
             case[1],
             SettleResponse.parse(fba.allocator(), &reader, .{}),
         );
+    }
+}
+
+test "parse rejects pending settlement without transaction" {
+    var storage: [4096]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&storage);
+    var reader: std.Io.Reader = .fixed(
+        \\{"success":false,"errorReason":"settlement_pending","transaction":"","network":"eip155:1"}
+    );
+
+    try std.testing.expectError(
+        error.MissingTransaction,
+        SettleResponse.parse(fba.allocator(), &reader, .{}),
+    );
+}
+
+test "parse accepts pending transaction and other failures without transaction" {
+    const inputs = [_][]const u8{
+        \\{"success":false,"errorReason":"settlement_pending","transaction":"tx","network":"eip155:1"}
+        ,
+        \\{"success":false,"errorReason":"insufficient_funds","transaction":"","network":"eip155:1"}
+        ,
+    };
+
+    for (inputs) |input| {
+        var storage: [4096]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&storage);
+        var reader: std.Io.Reader = .fixed(input);
+
+        _ = try SettleResponse.parse(fba.allocator(), &reader, .{});
     }
 }
