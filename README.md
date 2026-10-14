@@ -9,6 +9,10 @@ An x402 v2 core library with predictable latency and bounded memory use.
 - JSON serialization: `done`
 - Message validation against spec: `in progress`
 
+### Tests
+
+`src/x402/specification_tests.zig` covers seven complete examples from the x402 specification.
+
 ## Validation
 
 `validate()` in `PaymentPayload` and `PaymentRequired` accepts only 2 as a protocol version.

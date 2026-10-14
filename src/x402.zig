@@ -12,4 +12,5 @@ pub const Network = @import("x402/Network.zig");
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("x402/specification_tests.zig");
 }
