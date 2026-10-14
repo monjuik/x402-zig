@@ -121,6 +121,27 @@ test "spec v2 section 5.1.1: PaymentRequired" {
     }.check);
 }
 
+test "PaymentRequired.parse returns OutOfMemory with a 64-byte buffer" {
+    const input =
+        \\{
+        \\  "x402Version": 2,
+        \\  "resource": {
+        \\    "url": "https://api.example.com/premium-data"
+        \\  },
+        \\  "accepts": []
+        \\}
+    ;
+
+    var storage: [64]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&storage);
+    var reader: std.Io.Reader = .fixed(input);
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        PaymentRequired.parse(fba.allocator(), &reader, .{}),
+    );
+}
+
 test "spec v2 section 5.2.1: PaymentPayload" {
     const input =
         \\{
