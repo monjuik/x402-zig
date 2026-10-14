@@ -11,7 +11,6 @@ const ResourceInfo = @import("ResourceInfo.zig");
 const PaymentRequirements = @import("PaymentRequirements.zig");
 const Amount = @import("Amount.zig");
 const Network = @import("Network.zig");
-const json_limits = @import("json_limits.zig");
 const json_parse = @import("json_parse.zig");
 
 const PaymentPayload = @This();
@@ -58,80 +57,21 @@ pub fn jsonStringify(self: PaymentPayload, jw: anytype) !void {
     try jw.endObject();
 }
 
-pub const LimitError = ResourceInfo.LimitError || PaymentRequirements.LimitError || error{
-    PayloadTooLong,
-    TooManyExtensions,
-    ExtensionsTooLong,
-};
-
-///  Library default limits for collection counts and decoded UTF-8 string bytes.
-pub const Limits = struct {
-    resource: ResourceInfo.Limits = .{},
-    accepted: PaymentRequirements.Limits = .{},
-
-    /// Maximum total UTF-8 bytes of decoded keys and string values in payload.
-    max_payload_string_bytes: usize = 16 * 1024,
-
-    max_extensions: usize = 16,
-
-    /// Maximum total UTF-8 bytes of decoded keys and values in extensions.
-    max_extensions_string_bytes: usize = 16 * 1024,
-
-    /// Maximum byte length for all decoded string values.
-    pub fn maxStringBytes(limits: Limits) error{Overflow}!usize {
-        var total: usize = try limits.resource.maxStringBytes();
-        total = try std.math.add(usize, total, try limits.accepted.maxStringBytes());
-        total = try std.math.add(usize, total, limits.max_payload_string_bytes);
-        if (limits.max_extensions > 0) {
-            total = try std.math.add(usize, total, limits.max_extensions_string_bytes);
-        }
-        return total;
-    }
-
-    /// Checks decoded strings against the limits.
-    pub fn check(limits: Limits, payment: PaymentPayload) LimitError!void {
-        if (payment.resource) |resource| {
-            try limits.resource.check(resource);
-        }
-
-        try limits.accepted.check(payment.accepted);
-
-        json_limits.checkStringBytes(
-            .{ .object = payment.payload },
-            limits.max_payload_string_bytes,
-        ) catch return LimitError.PayloadTooLong;
-
-        if (payment.extensions) |extensions| {
-            if (extensions.count() > limits.max_extensions)
-                return error.TooManyExtensions;
-
-            json_limits.checkStringBytes(
-                .{ .object = extensions },
-                limits.max_extensions_string_bytes,
-            ) catch return LimitError.ExtensionsTooLong;
-        }
-    }
-};
-
-pub const ParseOptions = struct {
-    limits: Limits = .{},
-};
-
 /// Reads one JSON object. Pass a reader bounded to this message.
 pub fn parse(
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
-    options: ParseOptions,
 ) !PaymentPayload {
     const payload = try json_parse.parse(PaymentPayload, allocator, reader);
     try payload.validate();
-    try options.limits.check(payload);
     return payload;
 }
 
-pub fn validate(self: PaymentPayload) error{UnsupportedVersion}!void {
+pub fn validate(self: PaymentPayload) (ResourceInfo.ValidationError || error{UnsupportedVersion})!void {
     if (self.x402_version != 2)
         return error.UnsupportedVersion;
+
+    if (self.resource) |resource| try resource.validate();
 }
 
 pub fn jsonParse(
@@ -160,141 +100,6 @@ const Json = struct {
         };
     }
 };
-
-test "Limits.maxStringBytes handles custom limits and overflow" {
-    var limits: Limits = .{
-        .resource = .{ .max_url_bytes = 17 },
-        .accepted = .{ .max_scheme_bytes = 19 },
-        .max_payload_string_bytes = 7,
-        .max_extensions = 2,
-        .max_extensions_string_bytes = 11,
-    };
-    const resource = try limits.resource.maxStringBytes();
-    const accepted = try limits.accepted.maxStringBytes();
-
-    // The extension budget is a total, not a per-extension limit.
-    try std.testing.expectEqual(
-        resource + accepted + 7 + 11,
-        try limits.maxStringBytes(),
-    );
-
-    const max = std.math.maxInt(usize);
-
-    // Disabled extensions do not contribute, even with a huge budget.
-    limits.max_extensions = 0;
-    limits.max_extensions_string_bytes = max;
-    try std.testing.expectEqual(
-        resource + accepted + 7,
-        try limits.maxStringBytes(),
-    );
-
-    // The largest representable total is allowed.
-    limits.max_payload_string_bytes = max - resource - accepted;
-    try std.testing.expectEqual(max, try limits.maxStringBytes());
-
-    limits.max_payload_string_bytes += 1;
-    try std.testing.expectError(error.Overflow, limits.maxStringBytes());
-
-    const default_resource = try (ResourceInfo.Limits{}).maxStringBytes();
-    const default_accepted = try (PaymentRequirements.Limits{}).maxStringBytes();
-
-    const cases = [_]Limits{
-        // Overflow while calculating accepted.
-        .{ .accepted = .{ .max_extra_string_bytes = max } },
-
-        // Overflow while combining resource and accepted.
-        .{
-            .resource = .{
-                .max_url_bytes = max -
-                    (default_resource - (ResourceInfo.Limits{}).max_url_bytes),
-            },
-            .max_payload_string_bytes = 0,
-            .max_extensions = 0,
-        },
-
-        // Overflow while adding the payload budget.
-        .{ .max_payload_string_bytes = max },
-
-        // Overflow while adding the extension budget.
-        .{
-            .max_payload_string_bytes = max - default_resource - default_accepted,
-            .max_extensions = 1,
-            .max_extensions_string_bytes = 1,
-        },
-    };
-    for (cases) |case| {
-        try std.testing.expectError(error.Overflow, case.maxStringBytes());
-    }
-}
-
-test "Limits.check accepts boundaries and identifies exceeded fields" {
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
-        \\{"a":null}
-    , .{});
-    defer parsed.deinit();
-
-    const payment: PaymentPayload = .{
-        .x402_version = 2,
-        .resource = .{ .url = "url" },
-        .accepted = .{
-            .scheme = "exact",
-            .network = try Network.parse("eip155:1"),
-            .amount = try Amount.parse("1"),
-            .asset = "asset",
-            .pay_to = "recipient",
-            .max_timeout_seconds = 60,
-        },
-        .payload = parsed.value.object,
-        .extensions = parsed.value.object,
-    };
-
-    const limits: Limits = .{
-        .resource = .{ .max_url_bytes = 3 },
-        .accepted = .{ .max_scheme_bytes = 5 },
-        .max_payload_string_bytes = 1,
-        .max_extensions = 1,
-        .max_extensions_string_bytes = 1,
-    };
-    try limits.check(payment);
-
-    const cases = .{
-        .{
-            "resource",
-            ResourceInfo.Limits{ .max_url_bytes = 2 },
-            error.UrlTooLong,
-        },
-        .{
-            "accepted",
-            PaymentRequirements.Limits{ .max_scheme_bytes = 4 },
-            error.SchemeTooLong,
-        },
-        .{ "max_payload_string_bytes", 0, error.PayloadTooLong },
-        .{ "max_extensions_string_bytes", 0, error.ExtensionsTooLong },
-        .{ "max_extensions", 0, error.TooManyExtensions },
-    };
-
-    inline for (cases) |case| {
-        var reduced = limits;
-        @field(reduced, case[0]) = case[1];
-        try std.testing.expectError(case[2], reduced.check(payment));
-    }
-
-    // Empty JSON objects fit zero budgets; optional fields may be absent.
-    var empty = payment;
-    empty.resource = null;
-    empty.payload = .{};
-    empty.extensions = null;
-
-    const zero_limits: Limits = .{
-        .max_payload_string_bytes = 0,
-        .max_extensions = 0,
-        .max_extensions_string_bytes = 0,
-    };
-    try zero_limits.check(empty);
-
-    empty.extensions = .{};
-    try zero_limits.check(empty);
-}
 
 test "jsonStringify writes payment payload and optional fields" {
     var payment: PaymentPayload = .{
@@ -337,7 +142,7 @@ test "parse maps PaymentPayload and nested types" {
     var fba = std.heap.FixedBufferAllocator.init(&storage);
     var reader: std.Io.Reader = .fixed(input);
 
-    const payment = try PaymentPayload.parse(fba.allocator(), &reader, .{});
+    const payment = try PaymentPayload.parse(fba.allocator(), &reader);
 
     try std.testing.expectEqual(@as(u8, 2), payment.x402_version);
     try std.testing.expectEqualStrings("url", payment.resource.?.url);
@@ -356,23 +161,6 @@ test "parse maps PaymentPayload and nested types" {
     try std.testing.expectEqualStrings("100", payment.accepted.amount.bytes);
 }
 
-test "parse enforces custom payload limit" {
-    const input =
-        \\{"x402Version":2,"accepted":{"scheme":"exact","network":"eip155:1","amount":"100","asset":"asset","payTo":"recipient","maxTimeoutSeconds":60},"payload":{"a":"b"}}
-    ;
-
-    var storage: [4096]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&storage);
-    var reader: std.Io.Reader = .fixed(input);
-
-    try std.testing.expectError(
-        error.PayloadTooLong,
-        PaymentPayload.parse(fba.allocator(), &reader, .{
-            .limits = .{ .max_payload_string_bytes = 1 },
-        }),
-    );
-}
-
 test "parse rejects a network wildcard in accepted" {
     const input =
         \\{"x402Version":2,"accepted":{"scheme":"exact","network":"eip155:*","amount":"100","asset":"asset","payTo":"recipient","maxTimeoutSeconds":60},"payload":{}}
@@ -384,7 +172,7 @@ test "parse rejects a network wildcard in accepted" {
 
     try std.testing.expectError(
         error.UnexpectedToken,
-        PaymentPayload.parse(fba.allocator(), &reader, .{}),
+        PaymentPayload.parse(fba.allocator(), &reader),
     );
 }
 
@@ -399,7 +187,7 @@ test "parse rejects invalid amount in accepted" {
 
     try std.testing.expectError(
         error.InvalidNumber,
-        PaymentPayload.parse(fba.allocator(), &reader, .{}),
+        PaymentPayload.parse(fba.allocator(), &reader),
     );
 }
 
@@ -418,7 +206,7 @@ test "parse rejects unsupported x402 versions" {
 
         try std.testing.expectError(
             error.UnsupportedVersion,
-            PaymentPayload.parse(fba.allocator(), &reader, .{}),
+            PaymentPayload.parse(fba.allocator(), &reader),
         );
     }
 }

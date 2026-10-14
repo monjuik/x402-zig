@@ -70,85 +70,42 @@ pub fn jsonStringify(self: ResourceInfo, jw: anytype) !void {
     try jw.endObject();
 }
 
-pub const LimitError = error{
-    UrlTooLong,
-    DescriptionTooLong,
-    MimeTypeTooLong,
+pub const ValidationError = error{
     ServiceNameTooLong,
     TooManyTags,
     TagTooLong,
     IconUrlTooLong,
 };
 
-/// Library default limits for decoded strings, measured in UTF-8 bytes.
-pub const Limits = struct {
-    max_url_bytes: usize = 2048,
-    max_description_bytes: usize = 4096,
-    max_mime_type_bytes: usize = 256, // RFC 4288, https://datatracker.ietf.org/doc/html/rfc4288#section-4.2
-
-    /// Maximum byte length for all decoded string values
-    pub fn maxStringBytes(limits: Limits) error{Overflow}!usize {
-        var total: usize = max_service_name_bytes +
-            max_tags * max_tag_bytes +
-            max_icon_url_bytes;
-
-        total = try std.math.add(usize, total, limits.max_url_bytes);
-        total = try std.math.add(usize, total, limits.max_description_bytes);
-        total = try std.math.add(usize, total, limits.max_mime_type_bytes);
-
-        return total;
+pub fn validate(self: ResourceInfo) ValidationError!void {
+    if (self.service_name) |value| {
+        if (value.len > max_service_name_bytes)
+            return error.ServiceNameTooLong;
     }
 
-    /// Checks existing ResourceInfo against the limits
-    pub fn check(limits: Limits, resource: ResourceInfo) LimitError!void {
-        if (resource.url.len > limits.max_url_bytes)
-            return LimitError.UrlTooLong;
+    if (self.tags) |tags| {
+        if (tags.len > max_tags)
+            return error.TooManyTags;
 
-        if (resource.description) |value| {
-            if (value.len > limits.max_description_bytes)
-                return LimitError.DescriptionTooLong;
-        }
-
-        if (resource.mime_type) |value| {
-            if (value.len > limits.max_mime_type_bytes)
-                return LimitError.MimeTypeTooLong;
-        }
-
-        if (resource.service_name) |value| {
-            if (value.len > max_service_name_bytes)
-                return LimitError.ServiceNameTooLong;
-        }
-
-        if (resource.tags) |tags| {
-            if (tags.len > max_tags)
-                return LimitError.TooManyTags;
-
-            for (tags) |tag| {
-                if (tag.len > max_tag_bytes)
-                    return LimitError.TagTooLong;
-            }
-        }
-
-        if (resource.icon_url) |value| {
-            if (value.len > max_icon_url_bytes)
-                return LimitError.IconUrlTooLong;
+        for (tags) |tag| {
+            if (tag.len > max_tag_bytes)
+                return error.TagTooLong;
         }
     }
-};
 
-pub const ParseOptions = struct {
-    limits: Limits = .{},
-};
+    if (self.icon_url) |value| {
+        if (value.len > max_icon_url_bytes)
+            return error.IconUrlTooLong;
+    }
+}
 
 /// Reads one JSON object. Pass a reader bounded to this message.
 pub fn parse(
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
-    options: ParseOptions,
 ) !ResourceInfo {
     const resource = try json_parse.parse(ResourceInfo, allocator, reader);
-    try options.limits.check(resource); // yes, we already used the memory.
-    // But this allows us to use standard parser
+    try resource.validate();
 
     return resource;
 }
@@ -181,139 +138,6 @@ const Json = struct {
         };
     }
 };
-
-test "Limits.maxStringBytes uses custom limits" {
-    const limits: Limits = .{
-        .max_url_bytes = 1,
-        .max_description_bytes = 10,
-        .max_mime_type_bytes = 100,
-    };
-
-    // Configurable fields: 1 + 10 + 100 = 111.
-    // Others: 32 + 5 * 32 + 2048 = 2240.
-    try std.testing.expectEqual(
-        @as(usize, 2351),
-        try limits.maxStringBytes(),
-    );
-}
-
-test "Limits.maxStringBytes accepts the largest representable total" {
-    const fixed_bytes: usize = 2240;
-    const limits: Limits = .{
-        .max_url_bytes = std.math.maxInt(usize) - fixed_bytes,
-        .max_description_bytes = 0,
-        .max_mime_type_bytes = 0,
-    };
-
-    try std.testing.expectEqual(
-        std.math.maxInt(usize),
-        try limits.maxStringBytes(),
-    );
-}
-
-test "Limits.maxStringBytes rejects too large limits" {
-    const fixed_bytes: usize = 2240;
-    const limits: Limits = .{
-        .max_url_bytes = std.math.maxInt(usize) - fixed_bytes,
-        .max_description_bytes = 0,
-        .max_mime_type_bytes = 1,
-    };
-
-    try std.testing.expectError(
-        error.Overflow,
-        limits.maxStringBytes(),
-    );
-}
-
-test "Limits.check accepts all fields at their limits" {
-    const limits: Limits = .{
-        .max_url_bytes = 3,
-        .max_description_bytes = 3,
-        .max_mime_type_bytes = 3,
-    };
-
-    const resource: ResourceInfo = .{
-        .url = "a.a",
-        .description = "aaa",
-        .mime_type = "mmm",
-        .service_name = &@as([32]u8, @splat('s')),
-        .tags = &.{
-            &@as([32]u8, @splat('a')),
-            &@as([32]u8, @splat('b')),
-            &@as([32]u8, @splat('c')),
-            &@as([32]u8, @splat('d')),
-            &@as([32]u8, @splat('e')),
-        },
-        .icon_url = &@as([2048]u8, @splat('u')),
-    };
-    try limits.check(resource);
-}
-
-test "Limits.check identifies every exceeded limit" {
-    const limits: Limits = .{
-        .max_url_bytes = 3,
-        .max_description_bytes = 4,
-        .max_mime_type_bytes = 5,
-    };
-
-    const Case = struct {
-        resource: ResourceInfo,
-        expected: LimitError,
-    };
-
-    const cases = [_]Case{
-        .{
-            .resource = .{ .url = "uuuu" },
-            .expected = LimitError.UrlTooLong,
-        },
-        .{
-            .resource = .{
-                .url = "uuu",
-                .description = "descr",
-            },
-            .expected = LimitError.DescriptionTooLong,
-        },
-        .{
-            .resource = .{
-                .url = "uuu",
-                .mime_type = "mime/t",
-            },
-            .expected = LimitError.MimeTypeTooLong,
-        },
-        .{
-            .resource = .{
-                .url = "uuu",
-                .service_name = &@as([33]u8, @splat('n')),
-            },
-            .expected = LimitError.ServiceNameTooLong,
-        },
-        .{
-            .resource = .{
-                .url = "uuu",
-                .tags = &.{ "a", "b", "c", "d", "e", "f" },
-            },
-            .expected = LimitError.TooManyTags,
-        },
-        .{
-            .resource = .{
-                .url = "uuu",
-                .tags = &.{ "a", "b", "c", "d", &@as([33]u8, @splat('e')) },
-            },
-            .expected = LimitError.TagTooLong,
-        },
-        .{
-            .resource = .{
-                .url = "uuu",
-                .icon_url = &@as([2049]u8, @splat('u')),
-            },
-            .expected = LimitError.IconUrlTooLong,
-        },
-    };
-
-    for (cases) |case| {
-        try std.testing.expectError(case.expected, limits.check(case.resource));
-    }
-}
 
 test "jsonStringify writes protocol fields and omits absent optionals" {
     var buffer: [1024]u8 = undefined;
@@ -357,7 +181,7 @@ test "parse maps protocol fields to ResourceInfo" {
     var fba = std.heap.FixedBufferAllocator.init(&storage);
     var reader: std.Io.Reader = .fixed(input);
 
-    const resource = try ResourceInfo.parse(fba.allocator(), &reader, .{});
+    const resource = try ResourceInfo.parse(fba.allocator(), &reader);
 
     try std.testing.expectEqualStrings("url", resource.url);
     try std.testing.expectEqualStrings("description", resource.description.?);
@@ -369,17 +193,49 @@ test "parse maps protocol fields to ResourceInfo" {
     try std.testing.expectEqualStrings("icon", resource.icon_url.?);
 }
 
-test "parse enforces custom limits" {
-    var storage: [1024]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&storage);
-    var reader: std.Io.Reader = .fixed(
-        \\{"url":"abcd"}
-    );
+test "validate accepts metadata at specification boundaries" {
+    const resource: ResourceInfo = .{
+        .url = "url",
+        .service_name = &@as([max_service_name_bytes]u8, @splat('s')),
+        .tags = &@as([max_tags][]const u8, @splat(&@as([max_tag_bytes]u8, @splat('t')))),
+        .icon_url = &@as([max_icon_url_bytes]u8, @splat('u')),
+    };
+    try resource.validate();
+}
 
-    try std.testing.expectError(
-        error.UrlTooLong,
-        ResourceInfo.parse(fba.allocator(), &reader, .{
-            .limits = .{ .max_url_bytes = 3 },
-        }),
-    );
+test "parse enforces specification metadata limits" {
+    const Case = struct { resource: ResourceInfo, expected: ValidationError };
+    const cases = [_]Case{
+        .{ .resource = .{ .url = "url", .service_name = &@as([max_service_name_bytes + 1]u8, @splat('s')) }, .expected = error.ServiceNameTooLong },
+        .{ .resource = .{ .url = "url", .tags = &@as([max_tags + 1][]const u8, @splat("tag")) }, .expected = error.TooManyTags },
+        .{ .resource = .{ .url = "url", .tags = &.{&@as([max_tag_bytes + 1]u8, @splat('t'))} }, .expected = error.TagTooLong },
+        .{ .resource = .{ .url = "url", .icon_url = &@as([max_icon_url_bytes + 1]u8, @splat('u')) }, .expected = error.IconUrlTooLong },
+    };
+    for (cases) |case| {
+        var input: [4096]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&input);
+        try std.json.Stringify.value(case.resource, .{}, &writer);
+        var storage: [8192]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&storage);
+        var reader: std.Io.Reader = .fixed(writer.buffered());
+        try std.testing.expectError(case.expected, ResourceInfo.parse(fba.allocator(), &reader));
+    }
+}
+
+test "parse accepts fields beyond former library size limits" {
+    const resource: ResourceInfo = .{
+        .url = &@as([2049]u8, @splat('u')),
+        .description = &@as([4097]u8, @splat('d')),
+        .mime_type = &@as([257]u8, @splat('m')),
+    };
+    var input: [8192]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&input);
+    try std.json.Stringify.value(resource, .{}, &writer);
+    var storage: [16384]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&storage);
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    const parsed = try ResourceInfo.parse(fba.allocator(), &reader);
+    try std.testing.expectEqualStrings(resource.url, parsed.url);
+    try std.testing.expectEqualStrings(resource.description.?, parsed.description.?);
+    try std.testing.expectEqualStrings(resource.mime_type.?, parsed.mime_type.?);
 }

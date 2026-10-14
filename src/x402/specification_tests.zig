@@ -22,7 +22,7 @@ fn checkExample(
     var fba = std.heap.FixedBufferAllocator.init(&storage);
     var reader: std.Io.Reader = .fixed(input);
 
-    const value = try T.parse(fba.allocator(), &reader, .{});
+    const value = try T.parse(fba.allocator(), &reader);
     try check(value);
 }
 
@@ -33,7 +33,6 @@ fn checkResource(resource: ResourceInfo) !void {
 }
 
 fn checkRequirements(requirements: PaymentRequirements) !void {
-    try PaymentRequirements.Limits.check(.{}, requirements);
     try expectString("exact", requirements.scheme);
     try expectString("eip155:84532", requirements.network.bytes);
     try expectString("10000", requirements.amount.bytes);
@@ -70,6 +69,25 @@ fn checkSettlement(response: SettleResponse, success: bool) !void {
         try expectString("insufficient_funds", response.error_reason.?);
     try expect(response.amount == null);
     try expect(response.extensions == null);
+}
+
+test "message parsing validates nested resource metadata" {
+    const cases = .{
+        .{
+            PaymentRequired,
+            \\{"x402Version":2,"resource":{"url":"url","tags":["a","b","c","d","e","f"]},"accepts":[]}
+        },
+        .{
+            PaymentPayload,
+            \\{"x402Version":2,"resource":{"url":"url","tags":["a","b","c","d","e","f"]},"accepted":{"scheme":"exact","network":"eip155:1","amount":"100","asset":"asset","payTo":"recipient","maxTimeoutSeconds":60},"payload":{}}
+        },
+    };
+    inline for (cases) |case| {
+        var storage: [8192]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&storage);
+        var reader: std.Io.Reader = .fixed(case[1]);
+        try std.testing.expectError(error.TooManyTags, case[0].parse(fba.allocator(), &reader));
+    }
 }
 
 test "spec v2 section 5.1.1: PaymentRequired" {
@@ -138,7 +156,7 @@ test "PaymentRequired.parse returns OutOfMemory with a 64-byte buffer" {
 
     try std.testing.expectError(
         error.OutOfMemory,
-        PaymentRequired.parse(fba.allocator(), &reader, .{}),
+        PaymentRequired.parse(fba.allocator(), &reader),
     );
 }
 
