@@ -7,13 +7,24 @@ An x402 v2 core library for Zig.
 - Types: `done`
 - JSON parsing: `done`
 - JSON serialization: `done`
-- Message validation against spec: `in progress`
+- Message validation against spec: `done`
+
+## Supported types
+
+- `PaymentRequired`
+- `PaymentRequirements`
+- `PaymentPayload`
+- `VerifyResponse`
+- `SettleResponse`
+- `ResourceInfo`
+- `Amount`
+- `Network`
 
 ### Tests
 
 `src/x402/specification_tests.zig` covers complete examples of core entites from the x402 specification.
 
-## Validation
+### Validation
 
 - `validate()` functions apply x402 specification v2 checks.
 - `parse(allocator, reader)` functions apply them as well.
