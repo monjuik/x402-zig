@@ -72,8 +72,10 @@ pub fn jsonStringify(self: ResourceInfo, jw: anytype) !void {
 
 pub const ValidationError = error{
     ServiceNameTooLong,
+    InvalidServiceName,
     TooManyTags,
     TagTooLong,
+    InvalidTagName,
     IconUrlTooLong,
 };
 
@@ -81,6 +83,8 @@ pub fn validate(self: ResourceInfo) ValidationError!void {
     if (self.service_name) |value| {
         if (value.len > max_service_name_bytes)
             return error.ServiceNameTooLong;
+        if (value.len == 0 or !isPrintableAscii(value))
+            return error.InvalidServiceName;
     }
 
     if (self.tags) |tags| {
@@ -90,12 +94,19 @@ pub fn validate(self: ResourceInfo) ValidationError!void {
         for (tags) |tag| {
             if (tag.len > max_tag_bytes)
                 return error.TagTooLong;
+            if (tag.len == 0 or !isPrintableAscii(tag))
+                return error.InvalidTagName;
         }
     }
 
     if (self.icon_url) |value| {
         if (value.len > max_icon_url_bytes)
             return error.IconUrlTooLong;
+
+        // Specification states:
+        // Absolute https/http URL to an icon representing the service.
+        // Meantime Typescript and Go core libraries skip this check.
+        // So do we :)
     }
 }
 
@@ -138,6 +149,15 @@ const Json = struct {
         };
     }
 };
+
+/// Matches the string against ASCII symbols U+0020–U+007E
+fn isPrintableAscii(bytes: []const u8) bool {
+    for (bytes) |byte| {
+        if (byte < 0x20 or byte > 0x7e)
+            return false;
+    }
+    return true;
+}
 
 test "jsonStringify writes protocol fields and omits absent optionals" {
     var buffer: [1024]u8 = undefined;
@@ -210,6 +230,10 @@ test "parse enforces specification metadata limits" {
         .{ .resource = .{ .url = "url", .tags = &@as([max_tags + 1][]const u8, @splat("tag")) }, .expected = error.TooManyTags },
         .{ .resource = .{ .url = "url", .tags = &.{&@as([max_tag_bytes + 1]u8, @splat('t'))} }, .expected = error.TagTooLong },
         .{ .resource = .{ .url = "url", .icon_url = &@as([max_icon_url_bytes + 1]u8, @splat('u')) }, .expected = error.IconUrlTooLong },
+        .{ .resource = .{ .url = "url", .service_name = "" }, .expected = error.InvalidServiceName },
+        .{ .resource = .{ .url = "url", .service_name = "Café" }, .expected = error.InvalidServiceName },
+        .{ .resource = .{ .url = "url", .tags = &.{""} }, .expected = error.InvalidTagName },
+        .{ .resource = .{ .url = "url", .tags = &.{ "valid", "café" } }, .expected = error.InvalidTagName },
     };
     for (cases) |case| {
         var input: [4096]u8 = undefined;
@@ -238,4 +262,24 @@ test "parse accepts fields beyond former library size limits" {
     try std.testing.expectEqualStrings(resource.url, parsed.url);
     try std.testing.expectEqualStrings(resource.description.?, parsed.description.?);
     try std.testing.expectEqualStrings(resource.mime_type.?, parsed.mime_type.?);
+}
+
+test "isPrintableAscii accepts only bytes from 0x20 to 0x7e" {
+    const cases = .{
+        .{ "", true },
+        .{ "Hello, World! 123", true },
+        .{ " ~", true },
+        .{ "\x1f", false },
+        .{ "\x7f", false },
+        .{ "\x00", false },
+        .{ "line\nbreak", false },
+        .{ "tab\there", false },
+        .{ "Café", false },
+        .{ "東京", false },
+        .{ "hello\xff", false },
+    };
+
+    inline for (cases) |case| {
+        try std.testing.expectEqual(case[1], isPrintableAscii(case[0]));
+    }
 }
