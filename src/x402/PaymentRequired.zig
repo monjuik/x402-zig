@@ -57,17 +57,20 @@ pub fn jsonStringify(self: PaymentRequired, jw: anytype) !void {
     try jw.endObject();
 }
 
+pub const ValidationError = ResourceInfo.ValidationError || error{UnsupportedVersion};
+pub const ParseError = ValidationError || json_parse.ParseError;
+
 /// Reads one JSON object. Pass a reader bounded to this message.
 pub fn parse(
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
-) !PaymentRequired {
+) ParseError!PaymentRequired {
     const response = try json_parse.parse(PaymentRequired, allocator, reader);
     try response.validate();
     return response;
 }
 
-pub fn validate(self: PaymentRequired) (ResourceInfo.ValidationError || error{UnsupportedVersion})!void {
+pub fn validate(self: PaymentRequired) ValidationError!void {
     if (self.x402_version != 2)
         return error.UnsupportedVersion;
 

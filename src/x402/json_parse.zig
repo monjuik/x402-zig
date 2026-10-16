@@ -2,6 +2,8 @@
 
 const std = @import("std");
 
+pub const ParseError = std.json.ParseError(std.json.Reader);
+
 const parse_options: std.json.ParseOptions = .{
     .ignore_unknown_fields = true,
     .duplicate_field_behavior = .@"error",
@@ -13,7 +15,7 @@ pub fn parse(
     comptime T: type,
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
-) !T {
+) ParseError!T {
     var source = std.json.Reader.init(allocator, reader);
     defer source.deinit();
 

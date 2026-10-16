@@ -57,11 +57,13 @@ pub fn jsonStringify(self: VerifyResponse, jw: anytype) !void {
     try jw.endObject();
 }
 
+pub const ParseError = json_parse.ParseError;
+
 /// Reads one JSON object. Pass a reader bounded to this message.
 pub fn parse(
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
-) !VerifyResponse {
+) ParseError!VerifyResponse {
     return json_parse.parse(VerifyResponse, allocator, reader);
 }
 

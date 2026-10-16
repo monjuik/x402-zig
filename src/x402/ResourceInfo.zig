@@ -78,6 +78,7 @@ pub const ValidationError = error{
     InvalidTagName,
     IconUrlTooLong,
 };
+pub const ParseError = ValidationError || json_parse.ParseError;
 
 pub fn validate(self: ResourceInfo) ValidationError!void {
     if (self.service_name) |value| {
@@ -114,7 +115,7 @@ pub fn validate(self: ResourceInfo) ValidationError!void {
 pub fn parse(
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
-) !ResourceInfo {
+) ParseError!ResourceInfo {
     const resource = try json_parse.parse(ResourceInfo, allocator, reader);
     try resource.validate();
 

@@ -72,7 +72,10 @@ pub fn jsonStringify(self: SettleResponse, jw: anytype) !void {
     try jw.endObject();
 }
 
-pub fn validate(self: SettleResponse) error{MissingTransaction}!void {
+pub const ValidationError = error{MissingTransaction};
+pub const ParseError = ValidationError || json_parse.ParseError;
+
+pub fn validate(self: SettleResponse) ValidationError!void {
     if (self.error_reason) |reason| {
         // according to 5.3.2 Field Descriptions
         // `transaction` MUST be non-empty when `errorReason` is `settlement_pending`
@@ -85,7 +88,7 @@ pub fn validate(self: SettleResponse) error{MissingTransaction}!void {
 pub fn parse(
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
-) !SettleResponse {
+) ParseError!SettleResponse {
     const response = try json_parse.parse(SettleResponse, allocator, reader);
     try response.validate();
 
