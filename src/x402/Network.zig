@@ -27,18 +27,17 @@ pub fn parse(bytes: []const u8) error{InvalidNetwork}!Network {
         return error.InvalidNetwork;
 
     for (namespace) |byte| {
-        if (!((byte >= 'a' and byte <= 'z') or
-            (byte >= '0' and byte <= '9') or
-            byte == '-'))
-            return error.InvalidNetwork;
+        switch (byte) {
+            'a'...'z', '0'...'9', '-' => {},
+            else => return error.InvalidNetwork,
+        }
     }
 
     for (reference) |byte| {
-        if (!((byte >= 'a' and byte <= 'z') or
-            (byte >= 'A' and byte <= 'Z') or
-            (byte >= '0' and byte <= '9') or
-            byte == '-' or byte == '_'))
-            return error.InvalidNetwork;
+        switch (byte) {
+            'a'...'z', 'A'...'Z', '0'...'9', '-', '_' => {},
+            else => return error.InvalidNetwork,
+        }
     }
 
     return .{ .bytes = bytes };
